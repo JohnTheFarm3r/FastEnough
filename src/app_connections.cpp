@@ -1,5 +1,6 @@
 #include "app.h"
 #include "ui_panels.h"
+#include "companion.h"
 #include <algorithm>
 #include <cctype>
 #include <map>
@@ -348,6 +349,8 @@ void App::renderConnectionManager(FilePanel& panel) {
         ImGui::Spacing();
         ImGui::TextWrapped("WiFi: keep your phone and computer on the same network. Run Setup Wizard with USB connected, or use WiFi ADB Pairing on Android 11 or newer.");
         ImGui::Spacing();
+        ImGui::TextWrapped("Without USB debugging: install Fast Enough Companion on the phone. It appears here over WiFi or USB tethering.");
+        ImGui::Spacing();
         ImGui::TextWrapped("Select an available device to connect or open its files. Auto reconnects a saved device when the app starts. Delete removes its saved connection.");
         ImGui::Spacing();
         ImGui::TextWrapped("If a device is missing, unlock it, check the cable or WiFi network, and refresh the device list.");
@@ -375,14 +378,20 @@ void App::renderConnectionManager(FilePanel& panel) {
         }
     }
     int available = (int)std::count_if(physicalDevices.begin(), physicalDevices.end(),
-        [](const DeviceInfo& device) { return device.state == "device"; });
+        [](const DeviceInfo& device) { return device.state == "device" || device.state == "unpaired"; });
     std::string countLabel = std::to_string(available) + (available == 1 ? " device available" : " devices available");
     bool busy = !m_connectionPendingSerial.empty() || deviceFor(panel).isConnecting() ||
         m_primaryReconnectActive || m_wifiTransitionActive;
     if (busy || !m_connectionFeedback.empty()) {
         theme.box(ImVec2(origin.x, y), ImVec2(width, 48 * s), theme.raised, theme.surface, theme.border);
         theme.status(ImVec2(origin.x + padding, y + 15 * s), busy ? "Connecting..." : "Connection status", busy, 150 * s);
-        std::string detail = busy ? (!m_connectionPendingSerial.empty() ? m_connectionPendingSerial : deviceFor(panel).statusText()) : m_connectionFeedback;
+        std::string pending = m_connectionPendingSerial;
+        if (companion::isSerial(pending)) {
+            CompanionDeviceView view;
+            const bool known = companion::find(companion::idFromSerial(pending), view);
+            pending = (known && !view.paired ? "Tap Allow on " : "Connecting to ") + (known ? view.name : std::string("the phone"));
+        }
+        std::string detail = busy ? (!pending.empty() ? pending : deviceFor(panel).statusText()) : m_connectionFeedback;
         theme.label(ImVec2(origin.x + 166 * s, y + 15 * s), detail, width - 210 * s, theme.muted, 13);
         if (!busy && theme.button("##DismissConnectionStatus", "", ui::Icon::Close,
             ImVec2(origin.x + width - 35 * s, y + 9 * s), ImVec2(28 * s, 28 * s), theme.muted)) m_connectionFeedback.clear();
@@ -397,7 +406,7 @@ void App::renderConnectionManager(FilePanel& panel) {
         return -1;
     };
     auto openDevice = [&](const DeviceInfo& device) {
-        if (device.state != "device") {
+        if (device.state != "device" && device.state != "unpaired") {
             m_connectionFeedback = device.state == "unauthorized" ? "Unlock your phone and tap Allow on the USB debugging prompt." : "This device is offline. Check its cable or WiFi connection.";
             return;
         }
@@ -421,7 +430,10 @@ void App::renderConnectionManager(FilePanel& panel) {
         target.deviceOpenError.clear();
         m_showConnectionsWorkspace = m_showAppsWorkspace = m_showBackupManager = false;
         m_lastFocusedPanel = &target;
-        if (slot < 0) connectFromManager(device.serial, false);
+        if (slot < 0) {
+            if (device.state == "unpaired") pairCompanionDevice(device.serial);
+            else connectFromManager(device.serial, false);
+        }
     };
 
     bool wideHeader = innerWidth >= 1030 * s;
@@ -431,8 +443,12 @@ void App::renderConnectionManager(FilePanel& panel) {
     float cardWidth = (innerWidth - (columns - 1) * 12 * s) / columns;
     std::vector<DeviceInfo> visibleDevices;
     std::string query = lower(m_connectionSearch);
+    auto isWifiDevice = [](const DeviceInfo& device) {
+        return companion::isSerial(device.serial) ? device.transportType == AdbTransportType::Network
+                                                  : isWirelessAdbSerial(device.serial);
+    };
     for (const auto& device : physicalDevices) {
-        bool wifi = isWirelessAdbSerial(device.serial);
+        bool wifi = isWifiDevice(device);
         if ((m_connectionFilter == 1 && wifi) || (m_connectionFilter == 2 && !wifi)) continue;
         if (lower(device.model + " " + device.serial).find(query) != std::string::npos) visibleDevices.push_back(device);
     }
@@ -493,26 +509,30 @@ void App::renderConnectionManager(FilePanel& panel) {
         bool hovered = ImGui::IsItemHovered();
         const bool ready = connectedSlot(device.serial) >= 0;
         const std::string readiness = ready ? "Files ready. Click to open instantly." :
-            device.state == "device" ? "Preparing file access in the background..." : device.state;
+            device.state == "device" ? "Preparing file access in the background..." :
+            device.state == "unpaired" ? "Click to pair. Approve this computer on the phone." : device.state;
         ui::tooltip((device.model + "\n" + device.serial + "\n" + readiness).c_str());
         ui::icon(ui::Icon::Phone, ImVec2(p.x + 18 * s, p.y + 21 * s), 34 * s, theme.color(theme.text));
         theme.label(ImVec2(p.x + 70 * s, p.y + 17 * s), device.model.empty() ? device.serial : device.model,
             cardWidth - 185 * s, theme.text, 14, true);
         theme.label(ImVec2(p.x + cardWidth - 105 * s, p.y + 17 * s),
-            ready ? "Ready" : device.state == "device" ? "Preparing..." : "", 90 * s,
+            ready ? "Ready" : device.state == "device" ? "Preparing..." : device.state == "unpaired" ? "Not paired" : "", 90 * s,
             ready ? theme.green : theme.gold, 12);
-        bool wifi = isWirelessAdbSerial(device.serial);
-        const char* badge = wifi ? "WiFi" : "USB";
+        bool wifi = isWifiDevice(device);
+        const bool app = companion::isSerial(device.serial);
+        const char* badge = app ? (wifi ? "WiFi App" : "USB App") : wifi ? "WiFi" : "USB";
         ImVec4 badgeColor = wifi ? theme.green : theme.blue;
-        if (device.state != "device") { badge = device.state == "unauthorized" ? "Allow USB" : "Offline"; badgeColor = theme.gold; }
-        float badgeWidth = device.state == "unauthorized" ? 80 * s : 65 * s;
+        if (device.state == "unpaired") { badge = "Pair"; badgeColor = theme.gold; }
+        else if (device.state != "device") { badge = device.state == "unauthorized" ? "Allow USB" : "Offline"; badgeColor = theme.gold; }
+        float badgeWidth = device.state == "unauthorized" || (app && device.state == "device") ? 84 * s : 65 * s;
         ImVec2 badgePos(p.x + cardWidth - badgeWidth - 14 * s, p.y + 42 * s);
         ImVec4 badgeFill = badgeColor;
         badgeFill.w = .13f;
         ImGui::GetWindowDrawList()->AddRectFilled(badgePos, ImVec2(badgePos.x + badgeWidth, badgePos.y + 25 * s), theme.color(badgeFill), 6 * s);
         ui::icon(wifi ? ui::Icon::Wifi : ui::Icon::Usb, ImVec2(badgePos.x + 8 * s, badgePos.y + 5 * s), 15 * s, theme.color(badgeColor));
         theme.label(ImVec2(badgePos.x + 28 * s, badgePos.y + 5 * s), badge, badgeWidth - 30 * s, badgeColor, 12, true);
-        theme.label(ImVec2(p.x + 70 * s, p.y + 43 * s), device.serial, badgePos.x - p.x - 78 * s, theme.muted, 12);
+        theme.label(ImVec2(p.x + 70 * s, p.y + 43 * s), app ? "Companion app" : device.serial,
+            badgePos.x - p.x - 78 * s, theme.muted, 12);
         if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
         if (pressed) openDevice(device);
         ImGui::PopID();
@@ -626,6 +646,8 @@ void App::renderConnectionManager(FilePanel& panel) {
         m_statusTime = std::chrono::steady_clock::now();
     }
     y += savedHeight + 18 * s;
+
+    y = renderCompanionSection(panel, origin, width, y, openDevice);
 
     bool wideSetup = innerWidth >= 1020 * s;
     bool horizontalSteps = innerWidth >= 720 * s;

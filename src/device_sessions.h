@@ -75,6 +75,29 @@ public:
         return found == m_slots.end() ? -1 : found->second;
     }
 
+    // Moves a slot to a new identity. Fails if the new identity already has a slot.
+    bool rename(const std::string& from, const std::string& to) {
+        if (from.empty() || to.empty() || from == to) return false;
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto found = m_slots.find(from);
+        if (found == m_slots.end() || m_slots.count(to)) return false;
+        const int slot = found->second;
+        m_slots.erase(found);
+        m_slots.emplace(to, slot);
+        m_records[slot].identity = to;
+        return true;
+    }
+
+    // Frees the slot of an identity so ensure() can reuse it.
+    bool release(const std::string& identity) {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        auto found = m_slots.find(identity);
+        if (found == m_slots.end()) return false;
+        m_records[found->second].identity.clear();
+        m_slots.erase(found);
+        return true;
+    }
+
     T& at(int slot) const {
         std::lock_guard<std::mutex> lock(m_mutex);
         return *m_records.at(slot).value;

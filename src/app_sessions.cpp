@@ -1,9 +1,15 @@
 #include "app.h"
+#include "companion.h"
 #include "device_dokan.h"
 #include <algorithm>
 #include <map>
 
 std::string App::deviceIdentity(const std::string& serial) const {
+    // A companion phone that is also connected over ADB shares its ADB identity.
+    if (companion::isSerial(serial)) {
+        std::string adbIdentity = companion::linkedAdb(companion::idFromSerial(serial));
+        return adbIdentity.empty() ? serial : adbIdentity;
+    }
     {
         std::lock_guard<std::mutex> lock(m_identityMutex);
         auto found = m_deviceIdentities.find(serial);

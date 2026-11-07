@@ -22,6 +22,7 @@
     </ClCompile>
     <ClCompile Include="src\app_workspace.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="src\app_connections.cpp"><Filter>Source Files</Filter></ClCompile>
+    <ClCompile Include="src\app_companion.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="src\app_pairing.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="src\app_sessions.cpp"><Filter>Source Files</Filter></ClCompile>
     <ClCompile Include="thirdparty\qrcodegen\qrcodegen.cpp"><Filter>Source Files</Filter></ClCompile>
@@ -29,6 +30,9 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\device_client.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="src\companion.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\adb_discovery.cpp">
@@ -76,6 +80,9 @@
     <ClInclude Include="src\local_directory.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="src\windows_file_entry.h"><Filter>Header Files</Filter></ClInclude>
     <ClInclude Include="src\device_client.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\companion.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="src\adb_discovery.h">

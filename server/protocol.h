@@ -38,7 +38,13 @@ enum {
     CMD_RESTORE_BACKUP_ARCHIVE = 24, // payload: JSON restore manifest for a staged ZIP64 store archive
     CMD_CREATE_BACKUP_ARCHIVE = 25, // payload: JSON app selection, returns a device-local ZIP64 store archive
     CMD_TRUNCATE_FILE = 26, // payload: [8B size][path], preserve existing prefix
+    CMD_HELLO = 27,         // payload: JSON client identity, required first by the companion app
+    CMD_APP_LIST = 28,      // payload: none, returns JSON list of installed apps (companion app)
+    CMD_APP_INSTALL = 29,   // payload: JSON {"paths": [...]} of staged APK files (companion app)
+    CMD_APP_UNINSTALL = 30, // payload: package name (companion app)
 };
+
+#define AFM_DISCOVERY_PORT 5745
 
 // Responses (server -> client)
 enum {

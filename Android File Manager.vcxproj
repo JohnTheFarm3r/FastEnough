@@ -85,6 +85,7 @@
       <PreprocessorDefinitions>WIN32;_DEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
       <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)thirdparty\imgui;$(ProjectDir)thirdparty\imgui\backends;$(ProjectDir)thirdparty\motioncam\include;$(ProjectDir)thirdparty;$(ProjectDir)thirdparty\dokan\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
@@ -105,6 +106,7 @@
       <PreprocessorDefinitions>WIN32;NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
       <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)thirdparty\imgui;$(ProjectDir)thirdparty\imgui\backends;$(ProjectDir)thirdparty\motioncam\include;$(ProjectDir)thirdparty;$(ProjectDir)thirdparty\dokan\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
@@ -125,6 +127,7 @@
       <PreprocessorDefinitions>_DEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
       <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)thirdparty\imgui;$(ProjectDir)thirdparty\imgui\backends;$(ProjectDir)thirdparty\motioncam\include;$(ProjectDir)thirdparty;$(ProjectDir)thirdparty\dokan\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
@@ -145,6 +148,7 @@
       <PreprocessorDefinitions>NDEBUG;_CONSOLE;_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
       <LanguageStandard>stdcpp20</LanguageStandard>
+      <AdditionalOptions>/bigobj %(AdditionalOptions)</AdditionalOptions>
       <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)thirdparty\imgui;$(ProjectDir)thirdparty\imgui\backends;$(ProjectDir)thirdparty\motioncam\include;$(ProjectDir)thirdparty;$(ProjectDir)thirdparty\dokan\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
@@ -163,11 +167,13 @@
     <ClCompile Include="src\app.cpp" />
     <ClCompile Include="src\app_workspace.cpp" />
     <ClCompile Include="src\app_connections.cpp" />
+    <ClCompile Include="src\app_companion.cpp" />
     <ClCompile Include="src\app_pairing.cpp" />
     <ClCompile Include="src\app_sessions.cpp" />
     <ClCompile Include="thirdparty\qrcodegen\qrcodegen.cpp" />
     <ClCompile Include="src\backup_archive.cpp" />
     <ClCompile Include="src\device_client.cpp" />
+    <ClCompile Include="src\companion.cpp" />
     <ClCompile Include="src\adb_discovery.cpp" />
     <ClCompile Include="src\process_runner.cpp" />
     <ClCompile Include="src\mcraw_local.cpp" />
@@ -210,6 +216,7 @@
     <ClInclude Include="src\local_copy.h" />
     <ClInclude Include="src\backup_archive.h" />
     <ClInclude Include="src\device_client.h" />
+    <ClInclude Include="src\companion.h" />
     <ClInclude Include="src\adb_discovery.h" />
     <ClInclude Include="src\process_runner.h" />
     <ClInclude Include="src\transfer_coverage.h" />

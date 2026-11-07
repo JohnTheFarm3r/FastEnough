@@ -253,8 +253,20 @@ static LONG WINAPI UnhandledCrashLogger(EXCEPTION_POINTERS* info) {
         localtime_s(&tm, &tt);
         DWORD code = info && info->ExceptionRecord ? info->ExceptionRecord->ExceptionCode : 0;
         void* address = info && info->ExceptionRecord ? info->ExceptionRecord->ExceptionAddress : nullptr;
+        // Module and offset stay meaningful across runs, unlike the absolute address.
+        HMODULE module = nullptr;
+        char moduleName[MAX_PATH] = "?";
+        uintptr_t offset = (uintptr_t)address;
+        if (address && GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                          (LPCSTR)address, &module)) {
+            GetModuleFileNameA(module, moduleName, MAX_PATH);
+            offset = (uintptr_t)address - (uintptr_t)module;
+        }
+        const char* shortName = strrchr(moduleName, '\\');
         f << std::put_time(&tm, "%Y-%m-%d %H:%M:%S") << " [CRASH] Unhandled exception"
-          << " code=0x" << std::hex << code << " address=" << address << std::dec << "\n";
+          << " code=0x" << std::hex << code << " address=" << address
+          << " module=" << (shortName ? shortName + 1 : moduleName) << "+0x" << offset
+          << std::dec << " thread=" << GetCurrentThreadId() << "\n";
     }
     return EXCEPTION_EXECUTE_HANDLER;
 }

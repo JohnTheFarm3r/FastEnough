@@ -1,4 +1,5 @@
 #include "app.h"
+#include "companion.h"
 #include "ui_widgets.h"
 #include "ui_transfer.h"
 #include "device_dokan.h"
@@ -268,7 +269,10 @@ void App::renderPaneHeader(FilePanel& panel, PanelSide side) {
         caption=panelAvailable(panel)?"Connected":"Disconnected";
         if (!panel.pendingDeviceSerial.empty()) caption=panel.deviceOpenError.empty()?"Opening files...":"Connection unavailable";
         if(panelAvailable(panel)) {
-            caption+=deviceSession(slot).client.isDirectConnection()?"  /  Direct connection":"  /  ADB";
+            auto& client=deviceSession(slot).client;
+            if(companion::isSerial(deviceSession(slot).serial))
+                caption+=client.isDirectConnection()?"  /  Companion app, WiFi":"  /  Companion app, USB";
+            else caption+=client.isDirectConnection()?"  /  Direct connection":"  /  ADB";
             if(slot==0&&m_dualChannelAvailable)caption+=" + "+m_secondaryChannelType;
         }
     }
@@ -624,7 +628,18 @@ void App::renderWorkspaceDrawer() {
             ImGui::Spacing();
             renderDeviceRootButton(slot);
             ImGui::Spacing();ImGui::TextDisabled("Connection");
-            ImGui::TextWrapped("%s",deviceSession(slot).client.isDirectConnection()?"Direct connection":"ADB connection");
+            if(companion::isSerial(deviceSession(slot).serial))
+                ImGui::TextWrapped("%s",deviceSession(slot).client.isDirectConnection()?"Companion app over WiFi":"Companion app over USB");
+            else ImGui::TextWrapped("%s",deviceSession(slot).client.isDirectConnection()?"Direct connection":"ADB connection");
+            {
+                const std::string& serial=deviceSession(slot).serial;
+                std::string appId=companion::isSerial(serial)?companion::idFromSerial(serial):companion::deviceForAdb(deviceIdentity(serial));
+                if(!appId.empty()&&!companion::linkedAdb(appId).empty()) {
+                    ImGui::Spacing();ImGui::TextUnformatted("Connect with");
+                    renderConnectionModeSwitch(appId,ImGui::GetCursorScreenPos(),ImVec2(ImGui::GetContentRegionAvail().x,ImGui::GetFrameHeight()));
+                    ImGui::TextDisabled("%s",companion::usesIp(appId)?"Companion app over USB tethering or WiFi":"USB debugging (ADB)");
+                }
+            }
             if(slot==0&&m_dualChannelAvailable)ImGui::TextDisabled("Additional connection: %s",m_secondaryChannelType.c_str());
             auto& prefs=m_prefs.pipePreferencesFor(deviceSession(slot).serial);
             ImGui::Spacing();

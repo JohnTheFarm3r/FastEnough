@@ -17,6 +17,32 @@ connect to Android devices. A separate Android SDK install is not
 required when running from the release ZIP.
 
 
+Without USB Debugging (Companion App)
+-------------------------------------
+Some apps refuse to run while Developer Options are enabled. For these
+phones, install "Fast Enough Companion.apk" from this ZIP on the phone
+instead of turning on USB debugging:
+
+1. Copy the APK to the phone and open it to install
+2. Open Fast Enough Companion and allow All files access
+3. Keep the phone on the same WiFi as this computer, or plug it in and
+   turn on USB tethering in the phone's network settings
+4. Open Connections in Fast Enough, click the phone, then tap Allow on
+   the phone to trust this computer
+
+WiFi and USB tethering can be used at the same time for faster
+transfers.
+
+If a phone has USB debugging on and also runs the companion app, Fast
+Enough recognizes it as one phone. Use the ADB / IP switch next to the
+phone in Connections, or in its device details, to choose how it
+connects. With IP selected, Fast Enough leaves USB debugging alone for
+that phone and uses the companion app over USB tethering or WiFi.
+
+Rooted phones can still use the Root button. The companion app asks
+your root manager for permission the first time.
+
+
 Dokan Driver (Required for Virtual Drive)
 ------------------------------------------
 To mount your Android device as a drive letter in Windows Explorer,

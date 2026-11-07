@@ -1,5 +1,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include "device_client.h"
+#include "companion.h"
+#include <nlohmann/json.hpp>
 #include "app.h" // for LOG macros
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -229,6 +231,11 @@ bool DeviceClient::runProcessFromFile(const std::string& command, const std::str
 ProcessResult DeviceClient::runAdbCommandResult(const std::string& args, uint32_t timeoutMs,
                                                std::function<bool()> shouldCancel) {
     const bool pairing = args.starts_with("pair ");
+    if (args.find("-s fe-app-") != std::string::npos) {
+        ProcessResult unavailable;
+        unavailable.errorMessage = "This device is connected through the companion app, not ADB";
+        return unavailable;
+    }
     LOG_DEBUG("ADB", "$ adb " + (pairing ? std::string("pair [redacted]") : args));
     ProcessOptions options;
     options.commandLine = toWide("\"" + m_adbPath + "\" " + args);
@@ -559,6 +566,8 @@ bool DeviceClient::verifyConnection() {
 }
 
 bool DeviceClient::isRootAvailable(const std::string& serial) {
+    // The companion app asks the phone's root manager when root is requested.
+    if (companion::isSerial(serial)) return true;
     std::string out = runAdbCommand("-s " + serial + " shell \"su -c id 2>/dev/null\"");
     return out.find("uid=0") != std::string::npos;
 }
@@ -723,6 +732,31 @@ static bool isAdbSuccess(const std::string& out) {
 std::vector<InstalledAppEntry> DeviceClient::listInstalledApps(const std::string& serial, bool includeSystem) {
     std::vector<InstalledAppEntry> apps;
     if (serial.empty()) return apps;
+    if (companion::isSerial(serial)) {
+        std::string reply;
+        if (!companion::request(companion::idFromSerial(serial), CMD_APP_LIST, "", reply, 120000)) {
+            m_lastError = reply;
+            return apps;
+        }
+        auto list = nlohmann::json::parse(reply, nullptr, false);
+        if (!list.is_array()) return apps;
+        for (const auto& entry : list) {
+            InstalledAppEntry app;
+            app.packageName = entry.value("package", "");
+            app.appName = entry.value("label", "");
+            app.apkPath = entry.value("path", "");
+            app.isSystem = entry.value("system", false);
+            if (app.packageName.empty() || (app.isSystem && !includeSystem)) continue;
+            if (app.appName == app.packageName) app.appName.clear();
+            apps.push_back(std::move(app));
+        }
+        std::sort(apps.begin(), apps.end(), [](const InstalledAppEntry& a, const InstalledAppEntry& b) {
+            const std::string& aName = a.appName.empty() ? a.packageName : a.appName;
+            const std::string& bName = b.appName.empty() ? b.packageName : b.appName;
+            return _stricmp(aName.c_str(), bName.c_str()) < 0;
+        });
+        return apps;
+    }
 
     auto parseList = [&](const std::string& out, bool isSystem) {
         std::istringstream ss(out);
@@ -782,6 +816,27 @@ bool DeviceClient::installApk(const std::string& serial, const std::string& apkP
     if (serial.empty() || apkPath.empty()) {
         output = "No device or APK path was provided.";
         return false;
+    }
+    if (companion::isSerial(serial)) {
+        const std::string id = companion::idFromSerial(serial);
+        std::string staging = companion::stagingDir(id);
+        if (staging.empty() || !m_connected) {
+            output = "Connect to the phone before installing apps.";
+            return false;
+        }
+        std::error_code ec;
+        uint64_t size = std::filesystem::file_size(toFsPath(apkPath), ec);
+        std::string remote = staging + "/install-" + std::to_string(GetTickCount64()) + ".apk";
+        if (ec || !pushFile(apkPath, remote, size)) {
+            output = "Could not copy the APK to the phone. " + m_lastError;
+            return false;
+        }
+        nlohmann::json request = {{"paths", {remote}}};
+        output.clear();
+        bool ok = companion::request(id, CMD_APP_INSTALL, request.dump(), output);
+        deleteFile(remote);
+        if (ok) output = "Success";
+        return ok;
     }
     std::string args = "-s " + serial + " install";
     if (reinstall) args += " -r";
@@ -1185,6 +1240,11 @@ bool DeviceClient::uninstallPackage(const std::string& serial, const std::string
         output = "No device or package was provided.";
         return false;
     }
+    if (companion::isSerial(serial)) {
+        bool ok = companion::request(companion::idFromSerial(serial), CMD_APP_UNINSTALL, packageName, output);
+        if (ok) output = "Success";
+        return ok;
+    }
 
     std::string flags;
     if (keepData) flags += " -k";
@@ -1205,6 +1265,10 @@ bool DeviceClient::backupApp(const std::string& serial, const std::string& packa
                              const std::string& backupRoot,
                              const AppBackupOptions& options, AppBackupRecord& outRecord, std::string& output,
                              BackupProgressCallback progress) {
+    if (companion::isSerial(serial)) {
+        output = "App backups need a USB debugging connection.";
+        return false;
+    }
     LOG_INFO("BackupEngine", "backupApp begin package=" + packageName + " serial=" + serial);
     bool cancelled = false;
     auto emitProgress = [&](const std::string& stage, int stageIndex, int stageCount,
@@ -1660,6 +1724,7 @@ bool DeviceClient::startServer(const std::string& serial, bool preferAdbForward,
         std::atomic<bool>& active;
         ~ConnectActivityReset() { active = false; }
     } connectActivityReset{m_startServerActive};
+    if (companion::isSerial(serial)) return startCompanion(serial, useRoot);
     bool changingPrivilege = m_connected && m_serial == serial && m_serverIsRoot != useRoot;
     bool canReuseConnection = m_connected && m_serial == serial && m_serverIsRoot == useRoot;
     LOG_INFO("Server", std::string("startServer(serial=") + serial + " prefer=" + (preferAdbForward ? "ADBForward" : "DirectTCP") + " root=" + (useRoot ? "Y" : "N") + ") begin");
@@ -1888,6 +1953,48 @@ bool DeviceClient::startServer(const std::string& serial, bool preferAdbForward,
     return false;
 }
 
+bool DeviceClient::startCompanion(const std::string& serial, bool useRoot) {
+    const std::string id = companion::idFromSerial(serial);
+    if (m_connected && m_serial == serial && m_serverIsRoot == useRoot && verifyConnection()) {
+        m_useRoot = useRoot;
+        return true;
+    }
+    companion::setWantRoot(id, useRoot);
+    m_useRoot = useRoot;
+    disconnectTcp();
+    m_serial = serial;
+    auto endpoints = companion::endpointsFor(id);
+    if (endpoints.empty()) {
+        m_lastError = "The phone is not reachable. Open the Fast Enough companion app on the phone.";
+        m_statusText = "ERROR: " + m_lastError;
+        return false;
+    }
+    for (const auto& endpoint : endpoints) {
+        m_statusText = "Connecting to the companion app (" + endpoint.kind + ")...";
+        if (!connectTcp(endpoint.host, endpoint.port) || !verifyConnection()) {
+            disconnectTcp();
+            continue;
+        }
+        m_serverPort = endpoint.port;
+        m_localPort = endpoint.port;
+        m_deviceIp = endpoint.host;
+        m_directConnection = !endpoint.isUsb();
+        m_connected = true;
+        publishConnectionProfile();
+        m_statusText = "Connected through the companion app";
+        if (useRoot && !m_serverIsRoot) {
+            std::string reason = companion::rootError(id);
+            m_lastError = reason.empty() ? "Root access was not granted on the phone." : reason;
+        }
+        LOG_INFO("Companion", "Connected to " + serial + " via " + endpoint.kind + " " + endpoint.host +
+            (m_serverIsRoot ? " as root" : ""));
+        return true;
+    }
+    if (m_lastError.empty()) m_lastError = "Could not connect to the companion app.";
+    m_statusText = "ERROR: " + m_lastError;
+    return false;
+}
+
 bool DeviceClient::connectDirect(const std::string& ip) {
     disconnectTcp();
     if (connectTcp(ip, AFM_PORT) && verifyConnection()) {
@@ -2010,6 +2117,13 @@ bool DeviceClient::tryUpgradeToDirect() {
 
 void DeviceClient::stopServer() {
     std::lock_guard<std::mutex> serverLk(m_serverMutex);
+    if (companion::isSerial(m_serial)) {
+        // The companion app keeps its server running.
+        disconnectTcp();
+        m_connected = false;
+        m_serial.clear();
+        return;
+    }
     if (m_connected) {
         std::lock_guard<std::mutex> lk(m_mutex);
         sendMsg(CMD_QUIT);
@@ -2030,8 +2144,12 @@ void DeviceClient::stopServer() {
     m_serial.clear();
 }
 
+// The most recent reason a socket was refused, for the calling thread.
+static thread_local std::string t_lastSocketError;
+
 uintptr_t DeviceClient::openServerSocket(const std::string& host, int port,
                                          const std::string& bindLocalIp) {
+    t_lastSocketError.clear();
     SOCKET sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (sock == INVALID_SOCKET) {
         LOG_ERROR("TCP", "socket() failed: WSA " + std::to_string(WSAGetLastError()));
@@ -2092,6 +2210,13 @@ uintptr_t DeviceClient::openServerSocket(const std::string& host, int port,
     setsockopt(sock, IPPROTO_TCP, TCP_KEEPINTVL, (const char*)&keepInterval, sizeof(keepInterval));
     setsockopt(sock, IPPROTO_TCP, TCP_KEEPCNT, (const char*)&keepCount, sizeof(keepCount));
 
+    std::string authError;
+    if (!companion::authorizeSocket((uintptr_t)sock, host, port, authError)) {
+        LOG_WARN("Companion", "Connection to " + host + " was refused: " + authError);
+        t_lastSocketError = authError;
+        closesocket(sock);
+        return (uintptr_t)INVALID_SOCKET;
+    }
     return (uintptr_t)sock;
 }
 
@@ -2100,6 +2225,7 @@ bool DeviceClient::connectTcp(const std::string& host, int port, const std::stri
     uintptr_t sockU = openServerSocket(host, port, bindLocalIp);
     if (sockU == (uintptr_t)INVALID_SOCKET) {
         LOG_WARN("TCP", "openServerSocket failed for " + host + ":" + std::to_string(port));
+        if (!t_lastSocketError.empty()) m_lastError = t_lastSocketError;
         return false;
     }
     LOG_INFO("TCP", "Connected to " + host + ":" + std::to_string(port));

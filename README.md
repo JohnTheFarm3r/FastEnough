@@ -86,13 +86,24 @@ $CXX = "$NDK\toolchains\llvm\prebuilt\windows-x86_64\bin\aarch64-linux-android21
 
 After rebuilding the server, force a client rebuild (`-t:Rebuild`) so the new binary gets embedded.
 
-### 4. Create a release ZIP
+### 4. (Optional) Build the companion app
+
+The Android companion app in `android/` hosts the same server inside an app, for phones that cannot use USB debugging. It packages `server/afm-server` as its root helper, so rebuild the server first if you changed it. JDK 21 or newer is required.
+
+```powershell
+cd android
+.\gradlew.bat assembleDebug
+```
+
+The APK is written to `android\app\build\outputs\apk\debug\app-debug.apk`.
+
+### 5. Create a release ZIP
 
 ```powershell
 .\scripts\package-release.ps1 -Version v1.0.16
 ```
 
-The packaging script builds the Release exe, checks that it is signed, downloads Android Platform Tools if needed, and creates a portable ZIP with ADB bundled in `platform-tools\`.
+The packaging script builds the Release exe and the companion APK, checks that the exe is signed, downloads Android Platform Tools if needed, and creates a portable ZIP with ADB bundled in `platform-tools\`.
 
 ## Running
 
@@ -108,12 +119,26 @@ Use `Mount as drive` from inside the app. The device shows up as `P:\` (or `Q:\`
 
 Use the in-app Setup Wizard or pair via WiFi ADB from your device's developer settings. Once paired, transfers work the same way.
 
+### Without USB debugging
+
+Some apps refuse to run while Developer Options are on. For those phones, install the companion app (`Fast Enough Companion.apk`) instead:
+
+* The app runs the file server inside a foreground service and uses the Android All files access permission.
+* Phones are found over WiFi and USB tethering with a UDP broadcast on port 5745. Phones that ignore broadcasts are probed directly on small subnets, and an address can be added by hand.
+* The first connection from a computer asks the phone for approval. The phone then issues a token that the computer sends with every connection.
+* WiFi and USB tethering connections combine into multi-pipe transfers like ADB forwards do.
+* On rooted phones the Root button still works. The app starts the server binary through `su` and hands each authorized connection to it, so root transfers are not proxied.
+* A phone with both USB debugging and the companion app is shown once. The client reads the companion id through `adb shell content query` (the app answers only the shell and root users) and links it to the ADB serial. An ADB / IP switch per phone selects which connection is used, and with IP selected the ADB entries of that phone are ignored.
+
+Files under `Android/data` and `Android/obb` and app backups need ADB or root, because Android does not give apps access to them.
+
 ## Project layout
 
 ```
 .
 ├── src/                     Windows client (ImGui + DX11)
 ├── server/                  Android server (C++17, static ARM64 ELF)
+├── android/                 Companion app for phones without USB debugging (Kotlin, JNI)
 ├── res/                     Icon and resource script (embeds server binary)
 ├── thirdparty/              Vendored dependencies (Dokan, MotionCam, simde, etc.)
 ├── setup.ps1                Fetches Dear ImGui

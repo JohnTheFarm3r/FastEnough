@@ -26,6 +26,8 @@ $readmePath = Join-Path $root 'readme.txt'
 $projfsImagePath = Join-Path $root 'projfs_enable.png'
 $platformToolsUrl = 'https://dl.google.com/android/repository/platform-tools-latest-windows.zip'
 $platformToolsCache = Join-Path $root 'thirdparty\android-platform-tools'
+$companionDir = Join-Path $root 'android'
+$companionApkPath = Join-Path $companionDir 'app\build\outputs\apk\release\app-release.apk'
 
 if ([string]::IsNullOrWhiteSpace($OutputDir)) {
     $OutputDir = $root
@@ -132,7 +134,21 @@ if (-not $SkipBuild) {
     }
 }
 
+if (-not $SkipBuild) {
+    Push-Location $companionDir
+    try {
+        & .\gradlew.bat assembleRelease --console=plain
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Companion app build failed.'
+        }
+    }
+    finally {
+        Pop-Location
+    }
+}
+
 Assert-FileExists $exePath
+Assert-FileExists $companionApkPath
 Assert-FileExists $dokanDllPath
 Assert-FileExists $DokanInstallerPath
 Assert-FileExists $readmePath
@@ -168,6 +184,7 @@ Copy-Item -LiteralPath $DokanInstallerPath -Destination (Join-Path $stageRoot 'D
 Copy-Item -LiteralPath $readmePath -Destination (Join-Path $stageRoot 'readme.txt')
 Copy-Item -LiteralPath $projfsImagePath -Destination (Join-Path $stageRoot 'projfs_enable.png')
 Copy-Item -LiteralPath $platformToolsDir -Destination (Join-Path $stageRoot 'platform-tools') -Recurse
+Copy-Item -LiteralPath $companionApkPath -Destination (Join-Path $stageRoot 'Fast Enough Companion.apk')
 
 New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 $zipPath = Join-Path $OutputDir "Fast Enough - Android File Manager $Version.zip"

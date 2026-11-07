@@ -295,6 +295,7 @@ private:
     bool recvMsg(MsgHeader& hdr, std::vector<char>& payload);
 
     bool tryDirectConnect(const std::string& ip, int port = AFM_PORT);
+    bool startCompanion(const std::string& serial, bool useRoot);
 
     std::string runProcess(const std::string& command);
     bool runProcessToFile(const std::string& command, const std::string& outputPath, std::string& output,
@@ -378,6 +379,7 @@ public:
     int localPort() const { return m_localPort; }
     int serverPort() const { return m_serverPort; }
     void setServerPort(int port) { m_serverPort = port; }
+    void setSerial(const std::string& serial) { m_serial = serial; }
     void setInlineCrc(uint32_t crc, const std::string& path) { m_inlineCrc = crc; m_inlineCrcPath = path; }
     uint32_t getInlineCrc() const { return m_inlineCrc; }
 

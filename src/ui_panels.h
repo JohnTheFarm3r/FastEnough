@@ -124,4 +124,318 @@ struct PanelStyle {
         label(ImVec2(p.x + 20 * s, p.y), value, width - 20 * s, ink, 13, true);
     }
 };
+
+inline bool lightTheme() {
+    ImVec4 bg = ImGui::GetStyleColorVec4(ImGuiCol_WindowBg);
+    return bg.x + bg.y + bg.z > 1.5f;
+}
+
+inline ImVec4 mix(ImVec4 a, ImVec4 b, float t) {
+    return ImVec4(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, a.w + (b.w - a.w) * t);
+}
+
+inline ImVec4 withAlpha(ImVec4 value, float alpha) {
+    value.w = alpha;
+    return value;
+}
+
+enum class Tone { Secondary, Primary, Danger, Quiet };
+enum class Accent { Info, Success, Warning, Danger };
+
+inline ImVec4 accentColor(Accent accent) {
+    const bool light = lightTheme();
+    switch (accent) {
+    case Accent::Success: return light ? rgb(0, 128, 90) : rgb(52, 211, 153);
+    case Accent::Warning: return light ? rgb(158, 96, 0) : rgb(251, 191, 36);
+    case Accent::Danger: return light ? rgb(196, 43, 58) : rgb(248, 113, 113);
+    default: return light ? rgb(0, 106, 190) : rgb(96, 170, 255);
+    }
+}
+
+// Gradient button that matches the panel buttons. Accepts the same label and
+// size conventions as ImGui::Button, including "##id" suffixes and negative widths.
+inline bool actionButton(const char* label, ImVec2 size = ImVec2(0, 0), Tone tone = Tone::Secondary) {
+    const float s = scale();
+    const bool light = lightTheme();
+    PanelStyle theme(light);
+    const char* hash = strstr(label, "##");
+    const std::string visible = hash ? std::string(label, hash) : std::string(label);
+    ImFont* font = semiboldFont ? semiboldFont : ImGui::GetFont();
+    const float fontSize = ImGui::GetFontSize();
+    const ImVec2 textSize = font->CalcTextSizeA(fontSize, FLT_MAX, 0, visible.c_str());
+    if (size.x == 0) size.x = textSize.x + 32 * s;
+    else if (size.x < 0) size.x = std::max(4.0f, ImGui::GetContentRegionAvail().x + size.x);
+    if (size.y == 0) size.y = ImGui::GetFrameHeight();
+
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const bool pressed = ImGui::InvisibleButton(label, size);
+    const bool hovered = ImGui::IsItemHovered();
+    const bool held = ImGui::IsItemActive();
+    if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+
+    const ImVec4 accent = ImGui::GetStyleColorVec4(ImGuiCol_CheckMark);
+    const ImVec4 white(1, 1, 1, 1);
+    ImVec4 top = theme.raised, bottom = theme.surface, edge = theme.border, ink = theme.text;
+    switch (tone) {
+    case Tone::Primary: {
+        top = mix(accent, white, 0.10f);
+        bottom = mix(accent, ImVec4(0, 0, 0, 1), 0.22f);
+        edge = mix(accent, white, 0.25f);
+        const float brightness = accent.x * 0.299f + accent.y * 0.587f + accent.z * 0.114f;
+        ink = brightness > 0.62f ? rgb(10, 18, 32) : white;
+        break;
+    }
+    case Tone::Danger:
+        top = light ? rgb(214, 66, 80) : rgb(128, 38, 52);
+        bottom = light ? rgb(182, 44, 58) : rgb(92, 27, 39);
+        edge = light ? rgb(170, 36, 50) : rgb(201, 80, 96);
+        ink = light ? white : rgb(255, 222, 226);
+        break;
+    case Tone::Quiet:
+        top = bottom = edge = ImVec4(0, 0, 0, 0);
+        ink = theme.muted;
+        break;
+    default: break;
+    }
+    if (hovered) {
+        if (tone == Tone::Quiet) {
+            top = theme.raised;
+            bottom = theme.raised;
+            ink = theme.text;
+        } else {
+            top = mix(top, white, 0.07f);
+            bottom = mix(bottom, white, 0.05f);
+        }
+        edge = tone == Tone::Secondary || tone == Tone::Quiet ? withAlpha(accent, 0.85f) : mix(edge, white, 0.15f);
+    }
+    if (held) std::swap(top, bottom);
+    if (tone != Tone::Quiet || hovered) theme.box(p, size, top, bottom, edge, 7);
+
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const float textX = p.x + std::max(8 * s, (size.x - textSize.x) * 0.5f);
+    const float textY = p.y + (size.y - textSize.y) * 0.5f;
+    draw->PushClipRect(ImVec2(p.x + 4 * s, p.y), ImVec2(p.x + size.x - 4 * s, p.y + size.y), true);
+    draw->AddText(font, fontSize, ImVec2(textX, textY), theme.color(ink), visible.c_str());
+    draw->PopClipRect();
+    return pressed;
+}
+
+// Modal dialog frame shared by all dialogs. Always pair a true result with endDialog().
+inline bool beginDialog(const char* id, float width, bool autoResize = true, ImGuiWindowFlags extraFlags = 0,
+    bool keepCentered = false) {
+    const float s = scale();
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(viewport->GetCenter(), keepCentered ? ImGuiCond_Always : ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (keepCentered) extraFlags |= ImGuiWindowFlags_NoMove;
+    if (width > 0 && autoResize)
+        ImGui::SetNextWindowSize(ImVec2(std::min(width * s, viewport->WorkSize.x * 0.92f), 0));
+    const bool light = lightTheme();
+    PanelStyle theme(light);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(24 * s, 22 * s));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 14 * s);
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10 * s, 10 * s));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 1.0f);
+    ImGui::PushStyleColor(ImGuiCol_ModalWindowDimBg, ImVec4(0.01f, 0.02f, 0.04f, light ? 0.38f : 0.64f));
+    ImGui::PushStyleColor(ImGuiCol_Border, theme.border);
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse | extraFlags;
+    if (autoResize) flags |= ImGuiWindowFlags_AlwaysAutoResize;
+    const bool open = ImGui::BeginPopupModal(id, nullptr, flags);
+    if (!open) {
+        ImGui::PopStyleColor(2);
+        ImGui::PopStyleVar(4);
+    }
+    return open;
+}
+
+inline void endDialog() {
+    ImGui::EndPopup();
+    ImGui::PopStyleColor(2);
+    ImGui::PopStyleVar(4);
+}
+
+// Icon tile, title and optional subtitle. Returns true when the close button or Escape is used.
+inline bool dialogHeader(Icon glyph, ImVec4 accent, const char* title, const std::string& subtitle = {},
+    bool closable = false) {
+    const float s = scale();
+    PanelStyle theme(lightTheme());
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const ImVec2 start = ImGui::GetCursorScreenPos();
+    const float tile = 44 * s;
+    const float closeSize = 30 * s;
+    bool closed = false;
+
+    if (closable) {
+        const ImVec2 closePos(start.x + ImGui::GetContentRegionAvail().x - closeSize, start.y);
+        ImGui::SetCursorScreenPos(closePos);
+        closed = ImGui::InvisibleButton("##DialogClose", ImVec2(closeSize, closeSize));
+        const bool hovered = ImGui::IsItemHovered();
+        if (hovered) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            draw->AddRectFilled(closePos, ImVec2(closePos.x + closeSize, closePos.y + closeSize),
+                theme.color(theme.raised), 8 * s);
+        }
+        icon(Icon::Close, ImVec2(closePos.x + 8 * s, closePos.y + 8 * s), 14 * s,
+            theme.color(hovered ? theme.text : theme.muted));
+        if (ImGui::IsKeyPressed(ImGuiKey_Escape) && ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows))
+            closed = true;
+        ImGui::SetCursorScreenPos(start);
+    }
+
+    draw->AddRectFilled(start, ImVec2(start.x + tile, start.y + tile), theme.color(withAlpha(accent, 0.15f)), 12 * s);
+    draw->AddRect(start, ImVec2(start.x + tile, start.y + tile), theme.color(withAlpha(accent, 0.38f)), 12 * s, 0, s);
+    icon(glyph, ImVec2(start.x + 11 * s, start.y + 11 * s), 22 * s, theme.color(accent));
+    ImGui::Dummy(ImVec2(tile, tile));
+    ImGui::SameLine(0, 14 * s);
+
+    const float textWidth = std::max(40 * s, ImGui::GetContentRegionAvail().x - (closable ? closeSize + 8 * s : 0));
+    ImFont* headingFont = connectionHeadingFont ? connectionHeadingFont : semiboldFont;
+    const float titleHeight = headingFont ? headingFont->FontSize : ImGui::GetTextLineHeight();
+    float groupHeight = titleHeight;
+    if (!subtitle.empty())
+        groupHeight += 4 * s + ImGui::CalcTextSize(subtitle.c_str(), nullptr, false, textWidth).y;
+    if (groupHeight < tile)
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (tile - groupHeight) * 0.5f);
+
+    ImGui::BeginGroup();
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0, 4 * s));
+    ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + textWidth);
+    if (headingFont) ImGui::PushFont(headingFont);
+    ImGui::PushStyleColor(ImGuiCol_Text, theme.text);
+    ImGui::TextUnformatted(title);
+    ImGui::PopStyleColor();
+    if (headingFont) ImGui::PopFont();
+    if (!subtitle.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, theme.muted);
+        ImGui::TextUnformatted(subtitle.c_str());
+        ImGui::PopStyleColor();
+    }
+    ImGui::PopTextWrapPos();
+    ImGui::PopStyleVar();
+    ImGui::EndGroup();
+    ImGui::Dummy(ImVec2(0, 2 * s));
+    return closed;
+}
+
+// Right-aligns the next row of footer buttons whose combined width is buttonsWidth.
+inline void dialogFooter(float buttonsWidth) {
+    const float s = scale();
+    ImGui::Dummy(ImVec2(0, 4 * s));
+    const float available = ImGui::GetContentRegionAvail().x;
+    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + std::max(0.0f, available - buttonsWidth));
+}
+
+inline float footerButtonHeight() { return std::max(34 * scale(), ImGui::GetFrameHeight() + 6 * scale()); }
+
+// Rounded status pill with a leading dot.
+inline void statusChip(const char* text, ImVec4 ink) {
+    const float s = scale();
+    PanelStyle theme(lightTheme());
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const ImVec2 textSize = ImGui::CalcTextSize(text);
+    const float height = textSize.y + 10 * s;
+    const float width = textSize.x + 34 * s;
+    draw->AddRectFilled(p, ImVec2(p.x + width, p.y + height), theme.color(withAlpha(ink, 0.14f)), height * 0.5f);
+    draw->AddRect(p, ImVec2(p.x + width, p.y + height), theme.color(withAlpha(ink, 0.35f)), height * 0.5f, 0, 1.0f);
+    draw->AddCircleFilled(ImVec2(p.x + 13 * s, p.y + height * 0.5f), 4 * s, theme.color(ink));
+    draw->AddText(ImVec2(p.x + 24 * s, p.y + 5 * s), theme.color(ink), text);
+    ImGui::Dummy(ImVec2(width, height));
+}
+
+// Small uppercase caption used above grouped content.
+inline void sectionLabel(const char* text) {
+    PanelStyle theme(lightTheme());
+    ImGui::PushStyleColor(ImGuiCol_Text, theme.muted);
+    if (semiboldFont) ImGui::PushFont(semiboldFont);
+    ImGui::TextUnformatted(text);
+    if (semiboldFont) ImGui::PopFont();
+    ImGui::PopStyleColor();
+}
+
+// Large clickable option with icon, title and description.
+inline bool choiceCard(const char* id, Icon glyph, ImVec4 accent, const char* title, const char* description,
+    float width = 0, const char* badge = nullptr) {
+    const float s = scale();
+    PanelStyle theme(lightTheme());
+    if (width <= 0) width = ImGui::GetContentRegionAvail().x;
+    const float pad = 14 * s;
+    const float iconBox = 38 * s;
+    const float textX = pad + iconBox + 14 * s;
+    const float textWidth = std::max(20 * s, width - textX - pad);
+    ImFont* titleFont = semiboldFont ? semiboldFont : ImGui::GetFont();
+    const float fontSize = ImGui::GetFontSize();
+    const float lineHeight = ImGui::GetTextLineHeight();
+    const float descriptionHeight = description && *description
+        ? ImGui::CalcTextSize(description, nullptr, false, textWidth).y : 0.0f;
+    const float height = std::max(iconBox + pad * 2, pad * 2 + lineHeight + (descriptionHeight > 0 ? 4 * s + descriptionHeight : 0));
+
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const bool pressed = ImGui::InvisibleButton(id, ImVec2(width, height));
+    const bool hovered = ImGui::IsItemHovered();
+    const bool held = ImGui::IsItemActive();
+    if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+
+    ImVec4 top = hovered ? mix(theme.raised, accent, 0.10f) : theme.raised;
+    ImVec4 bottom = hovered ? mix(theme.surface, accent, 0.05f) : theme.surface;
+    if (held) std::swap(top, bottom);
+    const ImVec4 edge = hovered ? accent : (badge ? withAlpha(accent, 0.55f) : theme.border);
+    theme.box(p, ImVec2(width, height), top, bottom, edge, 10);
+
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const ImVec2 iconPos(p.x + pad, p.y + (height - iconBox) * 0.5f);
+    draw->AddRectFilled(iconPos, ImVec2(iconPos.x + iconBox, iconPos.y + iconBox), theme.color(withAlpha(accent, 0.15f)), 10 * s);
+    icon(glyph, ImVec2(iconPos.x + 9 * s, iconPos.y + 9 * s), 20 * s, theme.color(accent));
+
+    const float contentHeight = lineHeight + (descriptionHeight > 0 ? 4 * s + descriptionHeight : 0);
+    const float textY = p.y + (height - contentHeight) * 0.5f;
+    draw->AddText(titleFont, fontSize, ImVec2(p.x + textX, textY), theme.color(theme.text), title);
+    if (badge) {
+        const float titleWidth = titleFont->CalcTextSizeA(fontSize, FLT_MAX, 0, title).x;
+        const ImVec2 badgeText = ImGui::CalcTextSize(badge);
+        const ImVec2 badgeMin(p.x + textX + titleWidth + 10 * s, textY - 1 * s);
+        const ImVec2 badgeMax(badgeMin.x + badgeText.x + 14 * s, badgeMin.y + lineHeight + 2 * s);
+        if (badgeMax.x < p.x + width - pad) {
+            draw->AddRectFilled(badgeMin, badgeMax, theme.color(withAlpha(accent, 0.16f)), lineHeight);
+            draw->AddText(ImVec2(badgeMin.x + 7 * s, badgeMin.y + 1 * s), theme.color(accent), badge);
+        }
+    }
+    if (descriptionHeight > 0)
+        draw->AddText(ImGui::GetFont(), fontSize, ImVec2(p.x + textX, textY + lineHeight + 4 * s),
+            theme.color(theme.muted), description, nullptr, textWidth);
+    return pressed;
+}
+
+// Slim rounded progress track with a gradient fill.
+inline void progressTrack(ImVec2 p, float width, float height, float fraction, ImVec4 from, ImVec4 to) {
+    const float s = scale();
+    PanelStyle theme(lightTheme());
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    fraction = std::clamp(fraction, 0.0f, 1.0f);
+    const float radius = height * 0.5f;
+    draw->AddRectFilled(p, ImVec2(p.x + width, p.y + height),
+        theme.color(lightTheme() ? rgb(222, 230, 241) : rgb(24, 35, 51)), radius);
+    if (fraction <= 0.0f) return;
+    const float fillWidth = std::max(height, width * fraction);
+    const ImVec2 fillMax(p.x + fillWidth, p.y + height);
+    const int first = draw->VtxBuffer.Size;
+    draw->AddRectFilled(p, fillMax, theme.color(from), radius);
+    for (int i = first; i < draw->VtxBuffer.Size; ++i) {
+        auto& vertex = draw->VtxBuffer[i];
+        const float t = std::clamp((vertex.pos.x - p.x) / std::max(1.0f, fillWidth), 0.0f, 1.0f);
+        const ImU32 alpha = vertex.col & IM_COL32_A_MASK;
+        vertex.col = (theme.color(mix(from, to, t)) & ~IM_COL32_A_MASK) | alpha;
+    }
+    // Soft sheen that sweeps along the filled part while work is running.
+    if (fraction < 1.0f && fillWidth > 40 * s) {
+        const float sweep = std::fmod((float)ImGui::GetTime() * 0.6f, 1.0f);
+        const float glowX = p.x + sweep * fillWidth;
+        const float glowHalf = std::min(60 * s, fillWidth * 0.25f);
+        draw->PushClipRect(p, fillMax, true);
+        draw->AddRectFilledMultiColor(ImVec2(glowX - glowHalf, p.y), ImVec2(glowX, p.y + height),
+            IM_COL32(255, 255, 255, 0), IM_COL32(255, 255, 255, 46), IM_COL32(255, 255, 255, 46), IM_COL32(255, 255, 255, 0));
+        draw->AddRectFilledMultiColor(ImVec2(glowX, p.y), ImVec2(glowX + glowHalf, p.y + height),
+            IM_COL32(255, 255, 255, 46), IM_COL32(255, 255, 255, 0), IM_COL32(255, 255, 255, 0), IM_COL32(255, 255, 255, 46));
+        draw->PopClipRect();
+    }
+}
 }

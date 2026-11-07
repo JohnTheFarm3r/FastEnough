@@ -1,4 +1,5 @@
-// AFM Server - pushed to /data/local/tmp and executed via adb shell
+// AFM Server - pushed to /data/local/tmp and executed via adb shell, or hosted
+// inside the Android companion app.
 // Provides high-speed file transfer over TCP, bypassing ADB sync protocol.
 // Now with MCRAW container support for virtual directory browsing.
 
@@ -20,6 +21,9 @@
 #include <sys/sendfile.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
+#include <sys/un.h>
+#include <stddef.h>
+#include <ftw.h>
 
 #ifdef __aarch64__
 #include <arm_acle.h>  // ARMv8 CRC32 intrinsics
@@ -39,6 +43,8 @@
 #include <fstream>
 #include <limits>
 #include <memory>
+#include <set>
+#include <system_error>
 
 #include <motioncam/Decoder.hpp>
 #include <nlohmann/json.hpp>
@@ -48,6 +54,7 @@
 #undef TINY_DNG_WRITER_IMPLEMENTATION
 
 #include "protocol.h"
+#include "afm_host.h"
 
 #define BUF_SIZE AFM_CHUNK_SIZE
 #ifndef RENAME_NOREPLACE
@@ -108,6 +115,34 @@ static int send_error(int fd, const char* msg) {
 
 static int send_ok(int fd, const void* data, uint32_t len) {
     return send_msg(fd, RSP_OK, data, len);
+}
+
+// Create a directory and any missing parents.
+static int make_directories(const char* path) {
+    char buffer[PATH_MAX];
+    size_t length = strlen(path);
+    if (length == 0 || length >= sizeof(buffer)) { errno = ENAMETOOLONG; return -1; }
+    memcpy(buffer, path, length + 1);
+    for (size_t i = 1; i <= length; ++i) {
+        if (buffer[i] != '/' && buffer[i] != '\0') continue;
+        char saved = buffer[i];
+        buffer[i] = '\0';
+        if (mkdir(buffer, 0775) != 0 && errno != EEXIST) return -1;
+        buffer[i] = saved;
+    }
+    struct stat st;
+    if (stat(path, &st) != 0) return -1;
+    if (!S_ISDIR(st.st_mode)) { errno = ENOTDIR; return -1; }
+    return 0;
+}
+
+static int remove_tree_entry(const char* path, const struct stat*, int, struct FTW*) {
+    return remove(path);
+}
+
+// Recursively delete a directory without following symlinks.
+static int remove_tree(const char* path) {
+    return nftw(path, remove_tree_entry, 64, FTW_DEPTH | FTW_PHYS);
 }
 
 // Stream a memory buffer using the RSP_DATA/RSP_DONE chunked protocol (same as handle_pull)
@@ -1875,9 +1910,7 @@ static void handle_push(int fd, const void* payload, uint32_t payload_len) {
         char* slash = strrchr(parent, '/');
         if (slash && slash != parent) {
             *slash = '\0';
-            char cmd[PATH_MAX + 16];
-            snprintf(cmd, sizeof(cmd), "mkdir -p '%s'", parent);
-            system(cmd);
+            make_directories(parent);
             file_fd = open(pathbuf, O_WRONLY | O_CREAT | O_TRUNC, 0644);
         }
     }
@@ -1927,14 +1960,7 @@ static void handle_delete(int fd, const char* path, uint32_t path_len) {
         return;
     }
 
-    int ret;
-    if (S_ISDIR(st.st_mode)) {
-        char cmd[PATH_MAX + 16];
-        snprintf(cmd, sizeof(cmd), "rm -rf '%s'", pathbuf);
-        ret = system(cmd);
-    } else {
-        ret = unlink(pathbuf);
-    }
+    int ret = S_ISDIR(st.st_mode) ? remove_tree(pathbuf) : unlink(pathbuf);
 
     if (ret != 0) send_error(fd, strerror(errno));
     else send_ok(fd, NULL, 0);
@@ -1946,9 +1972,7 @@ static void handle_mkdir(int fd, const char* path, uint32_t path_len) {
     memcpy(pathbuf, path, path_len);
     pathbuf[path_len] = '\0';
 
-    char cmd[PATH_MAX + 16];
-    snprintf(cmd, sizeof(cmd), "mkdir -p '%s'", pathbuf);
-    if (system(cmd) != 0) send_error(fd, "mkdir failed");
+    if (make_directories(pathbuf) != 0) send_error(fd, strerror(errno));
     else send_ok(fd, NULL, 0);
 }
 
@@ -2184,9 +2208,7 @@ static void handle_write_range(int fd, const void* payload, uint32_t payload_len
         char* slash = strrchr(parent, '/');
         if (slash && slash != parent) {
             *slash = '\0';
-            char cmd[PATH_MAX + 16];
-            snprintf(cmd, sizeof(cmd), "mkdir -p '%s'", parent);
-            system(cmd);
+            make_directories(parent);
             file_fd = open(pathbuf, O_WRONLY | O_CREAT, 0644);
         }
     }
@@ -2806,7 +2828,46 @@ static void handle_mcraw_extract(int fd, const void* payload, uint32_t payload_l
 
 // --- Main ---
 
-static void handle_client(int client_fd) {
+// True when running inside the companion app. Clients must then authenticate
+// with CMD_HELLO, and shell-only features are unavailable.
+static bool g_host_mode = false;
+static AfmHostHooks g_hooks;
+static std::mutex g_clients_mutex;
+static std::set<int> g_client_fds;
+static std::atomic<int> g_listen_fd{-1};
+
+static void track_client(int fd, bool add) {
+    int count = 0;
+    {
+        std::lock_guard<std::mutex> lock(g_clients_mutex);
+        if (add) g_client_fds.insert(fd);
+        else g_client_fds.erase(fd);
+        count = (int)g_client_fds.size();
+    }
+    if (g_host_mode && g_hooks.clientsChanged) g_hooks.clientsChanged(count);
+}
+
+bool afm_send_fd(int channel, int fd) {
+    char marker = 'F';
+    struct iovec iov = { &marker, 1 };
+    char control[CMSG_SPACE(sizeof(int))] = {};
+    struct msghdr msg = {};
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control;
+    msg.msg_controllen = sizeof(control);
+    struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_RIGHTS;
+    cmsg->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(cmsg), &fd, sizeof(int));
+    ssize_t sent;
+    do sent = sendmsg(channel, &msg, MSG_NOSIGNAL);
+    while (sent < 0 && errno == EINTR);
+    return sent == 1;
+}
+
+static void handle_client(int client_fd, bool require_hello) {
     int bufsize = 16 * 1024 * 1024;
     setsockopt(client_fd, SOL_SOCKET, SO_SNDBUF, &bufsize, sizeof(bufsize));
     setsockopt(client_fd, SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof(bufsize));
@@ -2814,6 +2875,8 @@ static void handle_client(int client_fd) {
     setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
     std::vector<char> payload;
+    bool authorized = !require_hello;
+    bool handed_off = false;
 
     while (g_running) {
         MsgHeader hdr;
@@ -2832,6 +2895,62 @@ static void handle_client(int client_fd) {
         }
         char* payload_buf = payload.data();
         if (hdr.length > 0 && recv_all(client_fd, payload_buf, hdr.length) < 0) break;
+
+        if (!authorized && hdr.cmd != CMD_HELLO) {
+            send_error(client_fd, "Authorization required");
+            break;
+        }
+
+        if (hdr.cmd == CMD_HELLO) {
+            if (!g_host_mode || !g_hooks.authorize) {
+                send_ok(client_fd, "{}", 2);
+                continue;
+            }
+            std::string reply;
+            bool use_root = false;
+            if (!g_hooks.authorize(std::string(payload_buf, hdr.length), reply, use_root)) {
+                send_error(client_fd, reply.empty() ? "Not authorized" : reply.c_str());
+                break;
+            }
+            authorized = true;
+            // Start the root helper before answering, so the reply reports the
+            // privilege level the client will actually get.
+            int root_channel = use_root && g_hooks.rootHelperSocket ? g_hooks.rootHelperSocket() : -1;
+            try {
+                nlohmann::json answer = reply.empty() ? nlohmann::json::object() : nlohmann::json::parse(reply);
+                answer["root"] = root_channel >= 0;
+                if (use_root && root_channel < 0) answer["rootError"] = "Root access was not granted on the phone";
+                reply = answer.dump();
+            } catch (const std::exception&) {
+            }
+            if (send_ok(client_fd, reply.data(), (uint32_t)reply.size()) < 0) break;
+            if (root_channel >= 0 && afm_send_fd(root_channel, client_fd)) {
+                handed_off = true;
+                break;
+            }
+            continue;
+        }
+
+        if (g_host_mode) {
+            if (hdr.cmd == CMD_QUIT) {
+                // The companion app owns the server lifetime.
+                send_ok(client_fd, NULL, 0);
+                continue;
+            }
+            if (hdr.cmd == CMD_INSTALL_BATCH || hdr.cmd == CMD_RESTORE_BACKUP_ARCHIVE ||
+                hdr.cmd == CMD_CREATE_BACKUP_ARCHIVE) {
+                send_error(client_fd, "This needs root access or a USB debugging connection");
+                continue;
+            }
+            if (hdr.cmd == CMD_APP_LIST || hdr.cmd == CMD_APP_INSTALL || hdr.cmd == CMD_APP_UNINSTALL) {
+                std::string reply;
+                bool ok = g_hooks.appCommand &&
+                    g_hooks.appCommand(hdr.cmd, std::string(payload_buf, hdr.length), reply);
+                if (ok) send_ok(client_fd, reply.data(), (uint32_t)reply.size());
+                else send_error(client_fd, reply.empty() ? "Request failed" : reply.c_str());
+                continue;
+            }
+        }
 
         switch (hdr.cmd) {
             case CMD_PING:    handle_ping(client_fd); break;
@@ -2864,42 +2983,42 @@ static void handle_client(int client_fd) {
         }
     }
 
-    close(client_fd);
+    track_client(client_fd, false);
+    if (!handed_off) close(client_fd);
 }
 
-int main(int argc, char** argv) {
-    signal(SIGPIPE, SIG_IGN);
+static void start_client_thread(int client_fd, bool require_hello) {
+    close_socket_on_exec(client_fd);
+    tune_socket(client_fd);
+    track_client(client_fd, true);
+    try {
+        std::thread([client_fd, require_hello]() { handle_client(client_fd, require_hello); }).detach();
+    } catch (const std::system_error&) {
+        track_client(client_fd, false);
+        close(client_fd);
+    }
+}
 
-    int port = AFM_PORT;
-    if (argc > 1) port = atoi(argv[1]);
-
+static int open_listen_socket(int port) {
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd < 0) { perror("socket"); return 1; }
+    if (server_fd < 0) return -1;
     close_socket_on_exec(server_fd);
-
     int opt = 1;
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-
     struct sockaddr_in addr = {};
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_ANY);
     addr.sin_port = htons(port);
-
-    if (bind(server_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
-        perror("bind");
+    if (bind(server_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0 || listen(server_fd, 32) < 0) {
+        int error = errno;
         close(server_fd);
-        return 1;
+        errno = error;
+        return -1;
     }
+    return server_fd;
+}
 
-    if (listen(server_fd, 32) < 0) {
-        perror("listen");
-        close(server_fd);
-        return 1;
-    }
-
-    printf("AFM_READY %d\n", port);
-    fflush(stdout);
-
+static void accept_loop(int server_fd, bool require_hello) {
     while (g_running) {
         struct sockaddr_in client_addr;
         socklen_t client_len = sizeof(client_addr);
@@ -2908,24 +3027,95 @@ int main(int argc, char** argv) {
             if (errno == EINTR) continue;
             break;
         }
-        close_socket_on_exec(client_fd);
-        tune_socket(client_fd);
-
-        // Spawn a thread per client for parallel transfers
-        pthread_t t;
-        int* fd_ptr = (int*)malloc(sizeof(int));
-        if (!fd_ptr) { close(client_fd); continue; }
-        *fd_ptr = client_fd;
-        int started = pthread_create(&t, NULL, [](void* arg) -> void* {
-            int fd = *(int*)arg;
-            free(arg);
-            handle_client(fd);
-            return NULL;
-        }, fd_ptr);
-        if (started == 0) pthread_detach(t);
-        else { free(fd_ptr); close(client_fd); }
+        start_client_thread(client_fd, require_hello);
     }
+}
 
+int afm_host_run(int port, const AfmHostHooks& hooks) {
+    signal(SIGPIPE, SIG_IGN);
+    g_host_mode = true;
+    g_hooks = hooks;
+    g_running = true;
+    int server_fd = open_listen_socket(port);
+    if (server_fd < 0) {
+        int error = errno ? errno : 1;
+        if (g_hooks.listening) g_hooks.listening(false, error);
+        return error;
+    }
+    g_listen_fd = server_fd;
+    if (g_hooks.listening) g_hooks.listening(true, 0);
+    accept_loop(server_fd, true);
+    g_listen_fd = -1;
     close(server_fd);
     return 0;
 }
+
+void afm_host_stop() {
+    g_running = false;
+    int fd = g_listen_fd.exchange(-1);
+    if (fd >= 0) shutdown(fd, SHUT_RDWR);
+    std::lock_guard<std::mutex> lock(g_clients_mutex);
+    for (int client : g_client_fds) shutdown(client, SHUT_RDWR);
+}
+
+#ifndef AFM_HOST_LIBRARY
+// Root helper started by the companion app through su. It connects back to the
+// app over an abstract unix socket and serves the client sockets it receives.
+static int run_root_helper(const char* name, const char* secret) {
+    int channel = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (channel < 0) { perror("socket"); return 1; }
+    struct sockaddr_un addr = {};
+    addr.sun_family = AF_UNIX;
+    size_t name_len = strlen(name);
+    if (name_len + 1 > sizeof(addr.sun_path)) return 1;
+    memcpy(addr.sun_path + 1, name, name_len);
+    socklen_t addr_len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + 1 + name_len);
+    if (connect(channel, (struct sockaddr*)&addr, addr_len) < 0) { perror("connect"); return 1; }
+    uint32_t secret_len = (uint32_t)strlen(secret);
+    if (send_all(channel, &secret_len, 4) < 0 || send_all(channel, secret, secret_len) < 0) return 1;
+    printf("AFM_ROOT_READY\n");
+    fflush(stdout);
+
+    for (;;) {
+        char marker = 0;
+        struct iovec iov = { &marker, 1 };
+        char control[CMSG_SPACE(sizeof(int))] = {};
+        struct msghdr msg = {};
+        msg.msg_iov = &iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = control;
+        msg.msg_controllen = sizeof(control);
+        ssize_t n = recvmsg(channel, &msg, MSG_CMSG_CLOEXEC);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        for (struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg); cmsg; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+            if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS) continue;
+            int client_fd = -1;
+            memcpy(&client_fd, CMSG_DATA(cmsg), sizeof(int));
+            if (client_fd >= 0) start_client_thread(client_fd, false);
+        }
+    }
+    // The companion app closed the channel, so stop serving its clients.
+    _exit(0);
+}
+
+int main(int argc, char** argv) {
+    signal(SIGPIPE, SIG_IGN);
+
+    if (argc > 3 && strcmp(argv[1], "--root-helper") == 0)
+        return run_root_helper(argv[2], argv[3]);
+
+    int port = AFM_PORT;
+    if (argc > 1) port = atoi(argv[1]);
+
+    int server_fd = open_listen_socket(port);
+    if (server_fd < 0) { perror("listen"); return 1; }
+
+    printf("AFM_READY %d\n", port);
+    fflush(stdout);
+
+    accept_loop(server_fd, false);
+    close(server_fd);
+    return 0;
+}
+#endif

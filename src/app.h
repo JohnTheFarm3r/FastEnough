@@ -10,6 +10,7 @@
 #include <vector>
 #include <memory>
 #include <deque>
+#include <map>
 #include <set>
 #include <unordered_map>
 #include <unordered_set>
@@ -560,12 +561,22 @@ private:
         std::string backupProgressStageLabel;
         int backupProgressAppIndex = -1;
         float backupProgressAppFraction = -1.0f;
+        int backupProgressUsbPipes = 0;
+        int backupProgressWifiPipes = 0;
     };
 
     void setupStyle();
     void renderWorkspaceHeader();
     void renderConnectionManager(FilePanel& panel);
     void connectFromManager(const std::string& serial, bool savedWifi);
+    void pairCompanionDevice(const std::string& serial);
+    void linkCompanionDevices(const std::vector<DeviceInfo>& adbDevices);
+    void probeCompanionLinks(const std::vector<DeviceInfo>& adbDevices);
+    std::vector<DeviceInfo> applyConnectionModes(const std::vector<DeviceInfo>& adbDevices);
+    void setCompanionConnectionMode(const std::string& deviceId, bool useIp);
+    bool renderConnectionModeSwitch(const std::string& deviceId, ImVec2 pos, ImVec2 size);
+    float renderCompanionSection(FilePanel& panel, ImVec2 origin, float width, float y,
+                                 const std::function<void(const DeviceInfo&)>& openDevice);
     void renderWorkspaceToolbar();
     void renderPaneHeader(FilePanel& panel, PanelSide side);
     void renderPaneNavigation(FilePanel& panel);
@@ -579,7 +590,8 @@ private:
     void requestDeviceRoot(int slot, bool enabled, FilePanel* panel = nullptr);
     void renderDeviceRootButton(int slot, FilePanel* panel = nullptr);
     void startWorkspaceTransfer(bool move);
-    bool modernButton(const char* label, const ImVec2& size = ImVec2(0, 0));
+    enum class ButtonTone { Secondary, Primary, Danger, Quiet };
+    bool modernButton(const char* label, const ImVec2& size = ImVec2(0, 0), ButtonTone tone = ButtonTone::Secondary);
     bool modernSmallButton(const char* label);
     void renderMenuBar();
     void renderPreferencesWindow();
@@ -826,6 +838,10 @@ private:
     bool m_connectionsRefreshing = false;
     std::string m_connectionPendingSerial;
     std::string m_connectionFeedback;
+    char m_companionAddress[64] = {};
+    std::map<std::string, std::chrono::steady_clock::time_point> m_companionLinkAttempts;
+    std::set<std::string> m_unlinkedCompanions;
+    std::atomic<bool> m_connectionModeSwitching{false};
     int m_workspaceDrawer = 0;
     int m_detailsDeviceSlot = 0;
     bool m_showDeviceSettings = false;
@@ -887,6 +903,8 @@ private:
     std::chrono::steady_clock::time_point m_backupProgressLastTransferUpdate{};
     std::string m_backupProgressPackage;
     std::string m_backupProgressStageLabel;
+    int m_backupProgressUsbPipes = 0;
+    int m_backupProgressWifiPipes = 0;
     std::vector<std::string> m_backupProgressPackages;
     std::vector<float> m_backupAppProgress;
     std::vector<float> m_backupDisplayedAppProgress;

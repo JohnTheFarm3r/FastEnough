@@ -1,4 +1,5 @@
 #include "app.h"
+#include "companion.h"
 #include "ui_widgets.h"
 #include "ui_panels.h"
 #include "local_copy.h"
@@ -1061,6 +1062,36 @@ static bool isWifiSerial(const std::string& serial) {
     return isWirelessAdbSerial(serial);
 }
 
+static std::string companionChannelName(const std::string& kind) {
+    if (kind == "usb") return "USB (Tethering)";
+    if (kind == "ethernet") return "Ethernet (App)";
+    return "WiFi (App)";
+}
+
+static std::string companionPrimaryName(const DeviceClient& base) {
+    for (const auto& endpoint : companion::endpointsFor(companion::idFromSerial(base.connectedSerial())))
+        if (endpoint.host == base.connectedHost()) return companionChannelName(endpoint.kind);
+    return base.isDirectConnection() ? "WiFi (App)" : "USB (App)";
+}
+
+// Extra endpoints for parallel transfers to a companion device. USB links fill
+// the USB pipe count and network links fill the WiFi pipe count; the primary
+// connection already counts as one of its kind.
+static std::vector<CompanionEndpoint> companionChannelTargets(const DeviceClient& base, int usbPipes,
+                                                              int wifiPipes, int maxTotal) {
+    std::vector<CompanionEndpoint> usb, network, out;
+    for (const auto& endpoint : companion::endpointsFor(companion::idFromSerial(base.connectedSerial())))
+        (endpoint.isUsb() ? usb : network).push_back(endpoint);
+    const bool primaryUsb = !base.isDirectConnection();
+    int usbCount = primaryUsb ? 1 : 0;
+    int networkCount = primaryUsb ? 0 : 1;
+    for (size_t i = 0; !usb.empty() && usbCount < usbPipes && (int)out.size() + 1 < maxTotal; ++i, ++usbCount)
+        out.push_back(usb[i % usb.size()]);
+    for (size_t i = 0; !network.empty() && networkCount < wifiPipes && (int)out.size() + 1 < maxTotal; ++i, ++networkCount)
+        out.push_back(network[i % network.size()]);
+    return out;
+}
+
 static bool endsWithCI(const std::string& s, const std::string& suffix) {
     if (s.size() < suffix.size()) return false;
     return _stricmp(s.c_str() + s.size() - suffix.size(), suffix.c_str()) == 0;
@@ -1452,6 +1483,8 @@ App::App() {
     m_shutdownTransfer = false;
     m_batchThread = std::thread([this]() { processBatchQueue(); });
 
+    companion::start();
+
     m_shutdownPoll = false;
     m_pollThread = std::thread([this]() { devicePollLoop(); });
 
@@ -1483,6 +1516,7 @@ App::~App() {
     if (m_batchThread.joinable()) m_batchThread.join();
     if (m_pollThread.joinable()) m_pollThread.join();
     if (m_asyncThread.joinable()) m_asyncThread.join();
+    companion::stop();
 
     // Release wakelock process if still running
     if (m_wakeLockProcess) {
@@ -1806,6 +1840,8 @@ void App::drainUiMessages() {
                 m_backupProgressLastTransferUpdate = std::chrono::steady_clock::now();
             m_backupProgressPackage = std::move(message.backupProgressPackage);
             m_backupProgressStageLabel = std::move(message.backupProgressStageLabel);
+            m_backupProgressUsbPipes = message.backupProgressUsbPipes;
+            m_backupProgressWifiPipes = message.backupProgressWifiPipes;
             if (message.backupProgressAppIndex >= 0 &&
                 message.backupProgressAppIndex < (int)m_backupAppProgress.size()) {
                 int index = message.backupProgressAppIndex;
@@ -1937,8 +1973,8 @@ void App::setupStyle() {
     c[ImGuiCol_ModalWindowDimBg] = color(0,0,0,light?0.2f:0.5f);
 }
 
-bool App::modernButton(const char* label, const ImVec2& requestedSize) {
-    return ImGui::Button(label, requestedSize);
+bool App::modernButton(const char* label, const ImVec2& requestedSize, ButtonTone tone) {
+    return ui::actionButton(label, requestedSize, static_cast<ui::Tone>(tone));
 }
 
 bool App::modernSmallButton(const char* label) {
@@ -2255,7 +2291,9 @@ void App::render() {
         else renderConnectionManager(m_connectionsWorkspacePanel);
         ImGui::EndChild();
     } else {
-        float width = ImGui::GetContentRegionAvail().x-14*s;
+        // The content region can be narrower than the margin during resizes, and a
+        // negative width would make the clamp bounds below cross.
+        float width = std::max(0.0f, ImGui::GetContentRegionAvail().x-14*s);
         float gap=12*s;
         float leftWidth=std::clamp((width-gap)*m_prefs.paneSplit, std::min(240*s,width*0.3f), std::max(width*0.7f,width-240*s-gap));
         auto pane = [&](FilePanel& panel, PanelSide side, float paneWidth) {
@@ -2376,23 +2414,15 @@ void App::render() {
             m_connectionPopupScanned = true;
         }
     }
-    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    if (ImGui::BeginPopupModal("Connection Mode", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::Text("Current mode:");
-        if (m_device.isDirectConnection()) {
-            ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0.3f, 1, 0.5f, 1), "Direct TCP: %s", m_device.deviceIp().c_str());
-        } else {
-            ImGui::SameLine();
-            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1), "ADB Forward");
-        }
-
-        ImGui::Separator();
-        ImGui::Spacing();
+    if (ui::beginDialog("Connection Mode", 460)) {
+        const float s = ui::scale();
+        const bool direct = m_device.isDirectConnection();
+        bool closeRequested = ui::dialogHeader(direct ? ui::Icon::Wifi : ui::Icon::Usb, ui::accentColor(ui::Accent::Info),
+            "Connection mode", direct ? "Direct TCP: " + m_device.deviceIp() : std::string("ADB Forward over USB"), true);
+        if (closeRequested) ImGui::CloseCurrentPopup();
 
         // Show detected IPs (scanned asynchronously)
-        ImGui::Text("Detected device IPs:");
-        ImGui::Spacing();
+        ui::sectionLabel("DETECTED DEVICE IPS");
 
         std::string popupSerial;
         {
@@ -2413,9 +2443,7 @@ void App::render() {
                     ImGui::TextColored(ImVec4(0.3f, 1, 0.5f, 1), "(active)");
                 } else {
                     std::string btnId = "Connect##" + det.iface;
-                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.35f, 0.20f, 1));
-                    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.50f, 0.28f, 1));
-                    if (modernSmallButton(btnId.c_str())) {
+                    if (modernButton(btnId.c_str(), ImVec2(0, 0), ButtonTone::Primary)) {
                         std::string connectIp = det.ip;
                         std::string ser = popupSerial;
                         ImGui::CloseCurrentPopup();
@@ -2429,16 +2457,13 @@ void App::render() {
                             m_statusTime = std::chrono::steady_clock::now();
                         });
                     }
-                    ImGui::PopStyleColor(2);
                 }
             }
 
             if (!foundAny) {
                 ImGui::TextColored(ImVec4(1, 0.6f, 0.2f, 1), "No network interfaces found.");
                 ImGui::Spacing();
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.35f, 0.20f, 1));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.50f, 0.28f, 1));
-                if (modernButton("Enable USB Tethering", ImVec2(-1, 28))) {
+                if (modernButton("Enable USB Tethering", ImVec2(-1, ui::footerButtonHeight()), ButtonTone::Primary)) {
                     std::string ser = popupSerial;
                     ImGui::CloseCurrentPopup();
                     postAsync("Enabling USB tethering...", [this, ser]() {
@@ -2450,22 +2475,16 @@ void App::render() {
                         m_statusTime = std::chrono::steady_clock::now();
                     });
                 }
-                ImGui::PopStyleColor(2);
                 ImGui::TextDisabled("Or enable manually: Settings > Network > Hotspot > USB Tethering");
             }
         }
 
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-
         // Manual IP input
-        ImGui::Text("Manual IP:");
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(150);
+        ui::sectionLabel("MANUAL IP");
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - 110 * s);
         bool enterIp = ImGui::InputText("##ManualIP", m_manualIp, sizeof(m_manualIp), ImGuiInputTextFlags_EnterReturnsTrue);
         ImGui::SameLine();
-        if ((modernButton("Connect##manual") || enterIp) && strlen(m_manualIp) > 0) {
+        if ((modernButton("Connect##manual", ImVec2(-FLT_MIN, 0), ButtonTone::Primary) || enterIp) && strlen(m_manualIp) > 0) {
             std::string connectIp(m_manualIp);
             std::string ser = popupSerial;
             ImGui::CloseCurrentPopup();
@@ -2503,11 +2522,12 @@ void App::render() {
             }
         }
 
-        ImGui::Spacing();
-        if (modernButton("Close", ImVec2(-1, 28))) {
+        const float closeW = 110 * s;
+        ui::dialogFooter(closeW);
+        if (modernButton("Close##ConnectionModeClose", ImVec2(closeW, ui::footerButtonHeight()))) {
             ImGui::CloseCurrentPopup();
         }
-        ImGui::EndPopup();
+        ui::endDialog();
     }
 
     renderTransferAttention();
@@ -2912,15 +2932,10 @@ void App::renderCompareToolbar() {
     ImGui::Separator();
 
     bool compareWasEnabled = m_compareEnabled;
-    if (compareWasEnabled) {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.42f, 0.33f, 0.08f, 1));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.55f, 0.43f, 0.12f, 1));
-    }
-    if (modernButton(m_compareEnabled ? "Compare: On" : "Compare")) {
+    if (modernButton(m_compareEnabled ? "Compare: On" : "Compare", ImVec2(0, 0), compareWasEnabled ? ButtonTone::Primary : ButtonTone::Secondary)) {
         m_compareEnabled = !m_compareEnabled;
         m_compareDirty = true;
     }
-    if (compareWasEnabled) ImGui::PopStyleColor(2);
     if (ImGui::IsItemHovered())
         ImGui::SetTooltip("Highlight items in the current folder that are missing from the other pane");
 
@@ -3501,22 +3516,15 @@ void App::renderDeviceBar() {
                     for (int pipes = 1; pipes <= 4; pipes++) {
                         ImGui::SameLine(0, 3);
                         bool selected = (value == pipes);
-                        if (selected) {
-                            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.45f, 0.25f, 1));
-                            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.22f, 0.55f, 0.30f, 1));
-                            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.25f, 0.65f, 0.35f, 1));
-                        }
                         std::string btn = "x" + std::to_string(pipes) + "##" + id + std::to_string(pipes);
-                        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,
-                            ImVec2(ImGui::GetStyle().FramePadding.x * 0.78f,
-                                ImGui::GetStyle().FramePadding.y));
-                        bool pressed = modernButton(btn.c_str());
-                        ImGui::PopStyleVar();
+                        const float pipeButtonWidth = ImGui::CalcTextSize("x4").x +
+                            ImGui::GetStyle().FramePadding.x * 1.56f;
+                        bool pressed = modernButton(btn.c_str(), ImVec2(pipeButtonWidth, 0),
+                            selected ? ButtonTone::Primary : ButtonTone::Secondary);
                         if (pressed && value != pipes) {
                             value = pipes;
                             changed = true;
                         }
-                        if (selected) ImGui::PopStyleColor(3);
                     }
                     return changed;
                 };
@@ -4927,25 +4935,19 @@ void App::renderTransferOverlay() {
         ImGui::TextColored(ImVec4(1, 0.6f, 0.2f, 1), "Reconnection failed. Retry or cancel?");
         ImGui::Spacing();
 
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.35f, 0.20f, 1));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.50f, 0.28f, 1));
-        if (modernButton("Retry", ImVec2(120, 0))) {
+        if (modernButton("Retry", ImVec2(120, 0), ButtonTone::Primary)) {
             batch->userRetryRequested = true; batch->logEvent(LogLevel::Info,"Retry requested");
             m_batchCV.notify_all();
         }
-        ImGui::PopStyleColor(2);
 
         ImGui::SameLine();
 
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.12f, 0.12f, 1));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.75f, 0.18f, 0.18f, 1));
-        if (modernButton("Cancel Transfer", ImVec2(140, 0))) {
+        if (modernButton("Cancel Transfer", ImVec2(140, 0), ButtonTone::Danger)) {
             batch->requestStop(); batch->logEvent(LogLevel::Info,"Cancel requested");
             batch->userRetryRequested = false;
             // Stop is handled by progress callback checking stopRequested every chunk
             m_batchCV.notify_all();
         }
-        ImGui::PopStyleColor(2);
 
     } else if (batch->disconnected.load() && !isDone) {
         // Device disconnected during transfer - show status and manual retry
@@ -4955,9 +4957,7 @@ void App::renderTransferOverlay() {
             ImGui::TextColored(ImVec4(1, 0.7f, 0.3f, 1), "%s", batch->errorMessage.c_str());
         ImGui::Spacing();
 
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.35f, 0.20f, 1));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.50f, 0.28f, 1));
-        if (modernButton("Force Retry Now", ImVec2(140, 0))) {
+        if (modernButton("Force Retry Now", ImVec2(140, 0), ButtonTone::Primary)) {
             {
                 std::lock_guard<std::mutex> lk(m_batchMutex);
                 ++batch->retryGeneration;
@@ -4965,58 +4965,42 @@ void App::renderTransferOverlay() {
             m_batchCV.notify_all();
             batch->errorMessage = "User requested retry...";
         }
-        ImGui::PopStyleColor(2);
         ImGui::SameLine();
 
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.12f, 0.12f, 1));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.75f, 0.18f, 0.18f, 1));
-        if (modernButton("Cancel Transfer", ImVec2(140, 0))) {
+        if (modernButton("Cancel Transfer", ImVec2(140, 0), ButtonTone::Danger)) {
             batch->requestStop(); batch->logEvent(LogLevel::Info,"Cancel requested");
             batch->userRetryRequested = false;
             // Stop is handled by progress callback checking stopRequested every chunk
             m_batchCV.notify_all();
         }
-        ImGui::PopStyleColor(2);
 
     } else if (!isDone) {
         if (isPaused) {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f,0.35f,0.20f,1));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f,0.50f,0.28f,1));
-            if (modernButton("Resume", ImVec2(90, 0))) {
+            if (modernButton("Resume", ImVec2(90, 0), ButtonTone::Primary)) {
                 batch->pauseRequested = false; batch->logEvent(LogLevel::Info,"Resume requested");
                 m_batchCV.notify_all();
             }
-            ImGui::PopStyleColor(2);
         } else {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.40f,0.35f,0.10f,1));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.55f,0.50f,0.15f,1));
-            if (modernButton("Pause", ImVec2(90, 0))) {
+            if (modernButton("Pause", ImVec2(90, 0), ButtonTone::Secondary)) {
                 batch->pauseRequested = true; batch->logEvent(LogLevel::Info,"Pause requested");
             }
-            ImGui::PopStyleColor(2);
         }
 
         ImGui::SameLine();
         if (!m_confirmStopTransfer) {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f,0.12f,0.12f,1));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.75f,0.18f,0.18f,1));
-            if (modernButton("Stop", ImVec2(90, 0))) {
+            if (modernButton("Stop", ImVec2(90, 0), ButtonTone::Danger)) {
                 m_confirmStopTransfer = true;
             }
-            ImGui::PopStyleColor(2);
         } else {
             ImGui::TextColored(ImVec4(1,0.6f,0.2f,1), "Stop transfer?");
             ImGui::SameLine();
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f,0.12f,0.12f,1));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.75f,0.18f,0.18f,1));
-            if (modernButton("Yes", ImVec2(60, 0))) {
+            if (modernButton("Yes", ImVec2(60, 0), ButtonTone::Danger)) {
                 batch->requestStop(); batch->logEvent(LogLevel::Info,"Cancel requested");
                 batch->pauseRequested = false; batch->logEvent(LogLevel::Info,"Resume requested");
                 // Stop is handled by progress callback checking stopRequested every chunk
                 m_batchCV.notify_all();
                 m_confirmStopTransfer = false;
             }
-            ImGui::PopStyleColor(2);
             ImGui::SameLine();
             if (modernButton("No", ImVec2(60, 0))) {
                 m_confirmStopTransfer = false;
@@ -5846,6 +5830,28 @@ std::vector<App::ArchiveTransportChannel> App::buildArchiveTransportChannels(
     const std::string baseSerial = baseClient.connectedSerial().empty()
         ? deviceSession(slot).serial
         : baseClient.connectedSerial();
+    if (companion::isSerial(baseSerial)) {
+        const DevicePipePreference pipes = m_prefs.pipePreferencesFor(baseSerial);
+        ArchiveTransportChannel base;
+        base.dev = &baseClient;
+        base.name = companionPrimaryName(baseClient);
+        base.endpoint = baseClient.connectedHost() + ":" + std::to_string(baseClient.serverPort());
+        channels.push_back(std::move(base));
+        for (const auto& endpoint : companionChannelTargets(baseClient, std::clamp(pipes.usbPipeCount, 1, 4),
+                std::clamp(pipes.wifiPipeCount, 1, 4), TransferBatch::MAX_CHANNELS)) {
+            auto client = std::make_unique<DeviceClient>();
+            client->setSerial(baseSerial);
+            client->setServerPort(endpoint.port);
+            if (!client->connectTcp(endpoint.host, endpoint.port) || !client->verifyConnection()) continue;
+            ArchiveTransportChannel channel;
+            channel.dev = client.get();
+            channel.owned = std::move(client);
+            channel.name = companionChannelName(endpoint.kind);
+            channel.endpoint = endpoint.host + ":" + std::to_string(endpoint.port);
+            channels.push_back(std::move(channel));
+        }
+        return channels;
+    }
     const int remotePort = baseClient.serverPort();
     std::string usbSerial;
     std::string wifiIp;
@@ -5857,6 +5863,7 @@ std::vector<App::ArchiveTransportChannel> App::buildArchiveTransportChannels(
         usbSerial = baseSerial;
     }
 
+    std::string savedWifiIp;
     for (const auto& saved : m_prefs.savedWifiDevices) {
         const std::string wifiSerial = saved.wifiIp.empty()
             ? ""
@@ -5864,7 +5871,7 @@ std::vector<App::ArchiveTransportChannel> App::buildArchiveTransportChannels(
         if (saved.serial == baseSerial || wifiSerial == baseSerial ||
             (!usbSerial.empty() && saved.serial == usbSerial)) {
             if (usbSerial.empty()) usbSerial = saved.serial;
-            if (wifiIp.empty()) wifiIp = saved.wifiIp;
+            savedWifiIp = saved.wifiIp;
             break;
         }
     }
@@ -5902,6 +5909,8 @@ std::vector<App::ArchiveTransportChannel> App::buildArchiveTransportChannels(
         }
     }
 
+    // Ask the phone for its current address first. Saved addresses go stale
+    // whenever the router hands out a new DHCP lease.
     if (wifiIp.empty() && !baseSerial.empty()) {
         const std::string wlanOutput = baseClient.runAdbCommand(
             "-s " + baseSerial + " shell \"ip -4 addr show wlan0 2>/dev/null\"");
@@ -5912,6 +5921,10 @@ std::vector<App::ArchiveTransportChannel> App::buildArchiveTransportChannels(
             if (slash != std::string::npos) wifiIp = wlanOutput.substr(start, slash - start);
         }
     }
+    std::vector<std::string> wifiCandidates;
+    if (!wifiIp.empty()) wifiCandidates.push_back(wifiIp);
+    if (!savedWifiIp.empty() && savedWifiIp != wifiIp) wifiCandidates.push_back(savedWifiIp);
+    size_t wifiCandidateIndex = 0;
 
     const DevicePipePreference pipePreference = m_prefs.pipePreferencesFor(baseSerial);
     const int requestedUsb = std::clamp(pipePreference.usbPipeCount, 1, 4);
@@ -5971,12 +5984,24 @@ std::vector<App::ArchiveTransportChannel> App::buildArchiveTransportChannels(
         return false;
     };
 
+    bool wifiAddressConfirmed = false;
     auto addWifiChannel = [&]() -> bool {
-        if (wifiIp.empty()) return false;
-        auto client = std::make_unique<DeviceClient>();
-        client->setAdbPath(baseClient.getAdbPath());
-        client->setServerPort(baseClient.serverPort());
-        if (!client->connectTcp(wifiIp, remotePort) || !client->verifyConnection()) return false;
+        std::unique_ptr<DeviceClient> client;
+        while (wifiCandidateIndex < wifiCandidates.size()) {
+            wifiIp = wifiCandidates[wifiCandidateIndex];
+            client = std::make_unique<DeviceClient>();
+            client->setAdbPath(baseClient.getAdbPath());
+            client->setServerPort(baseClient.serverPort());
+            if (client->connectTcp(wifiIp, remotePort) && client->verifyConnection()) break;
+            client.reset();
+            // Once an address has carried a pipe, a later failure means the
+            // helper is saturated, not that the address is wrong.
+            if (wifiAddressConfirmed) return false;
+            LOG_WARN("BackupManager", "WiFi helper not reachable at " + wifiIp + ", trying next address");
+            ++wifiCandidateIndex;
+        }
+        if (!client) return false;
+        wifiAddressConfirmed = true;
 
         ArchiveTransportChannel channel;
         channel.dev = client.get();
@@ -6282,7 +6307,9 @@ void App::startBackupManagerBackup() {
                             message.backupProgressTotalBytes = remoteArchiveSize;
                             message.backupProgressBytesPerSecond = rate.bytesPerSecond;
                             message.backupProgressEtaSeconds = rate.etaSeconds;
-                            message.backupProgressStageLabel = "Downloading over " + activePipeSummary;
+                            message.backupProgressStageLabel = "Downloading backup archive";
+                            message.backupProgressUsbPipes = activeUsbPipes;
+                            message.backupProgressWifiPipes = activeWifiPipes;
                             postUiMessage(std::move(message));
                             return true;
                         });
@@ -6935,7 +6962,9 @@ void App::startBackupManagerRestorePaths(std::vector<std::string> backups) {
                             uploadMessage.backupProgressTotalBytes = archiveSize;
                             uploadMessage.backupProgressBytesPerSecond = rate.bytesPerSecond;
                             uploadMessage.backupProgressEtaSeconds = rate.etaSeconds;
-                            uploadMessage.backupProgressStageLabel = "Uploading over " + activePipeSummary;
+                            uploadMessage.backupProgressStageLabel = "Uploading restore archive";
+                            uploadMessage.backupProgressUsbPipes = activeUsbPipes;
+                            uploadMessage.backupProgressWifiPipes = activeWifiPipes;
                             postUiMessage(std::move(uploadMessage));
                         }
                         channelSeconds[channelIndex] = std::chrono::duration<double>(
@@ -7411,31 +7440,36 @@ void App::renderBackupManagerWindow() {
         }
         m_showBackupRootChoice = false;
     }
-    if (ImGui::BeginPopupModal("Backup capabilities", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    if (ui::beginDialog("Backup capabilities", 520)) {
         if (backupRootEnabled || !hasDevice) {
             ImGui::CloseCurrentPopup();
         } else {
-            if (m_backupRootAccess == BackupRootAccess::Checking || m_backupRootAccess == BackupRootAccess::Unknown)
-                ImGui::TextColored(ImVec4(0.35f, 0.70f, 1.0f, 1), "Checking root access...");
-            else
-                ImGui::TextColored(ImVec4(1.0f, 0.70f, 0.25f, 1), "Root access was not detected");
-            ImGui::Spacing();
-            ImGui::TextWrapped("Fast Enough can still back up APK files and shared app folders. Private app data and device-protected data require root access.");
-            ImGui::Spacing();
-            ImGui::TextDisabled("Choose how you want to continue for this device.");
-            ImGui::Spacing();
-            if (modernButton("Use Standard Backup", ImVec2(200, 0))) {
+            const bool checkingRoot = m_backupRootAccess == BackupRootAccess::Checking ||
+                m_backupRootAccess == BackupRootAccess::Unknown;
+            ui::dialogHeader(ui::Icon::Backup,
+                ui::accentColor(checkingRoot ? ui::Accent::Info : ui::Accent::Warning),
+                checkingRoot ? "Checking root access..." : "Root access was not detected",
+                "Choose how you want to continue for this device.");
+            ImGui::PushTextWrapPos(0);
+            ImGui::TextUnformatted("Fast Enough can still back up APK files and shared app folders. "
+                "Private app data and device-protected data require root access.");
+            ImGui::PopTextWrapPos();
+            ImGui::Dummy(ImVec2(0, 2 * s));
+            if (ui::choiceCard("##UseStandardBackup", ui::Icon::Backup, ui::accentColor(ui::Accent::Success),
+                    "Use Standard Backup", "Back up APKs and shared folders without root.", 0, "No root needed")) {
                 m_backupIncludeData = false;
                 m_backupIncludeDeData = false;
                 ImGui::CloseCurrentPopup();
             }
-            ImGui::SameLine();
-            if (modernButton("Check Root Again", ImVec2(200, 0))) {
+            ImGui::BeginDisabled(checkingRoot);
+            if (ui::choiceCard("##CheckRootAgain", ui::Icon::Refresh, ui::accentColor(ui::Accent::Info),
+                    "Check Root Again", "Approve the request in your root manager, then check again.")) {
                 m_backupRootAccess = BackupRootAccess::Unknown;
                 m_backupRootAccessSerial.clear();
             }
+            ImGui::EndDisabled();
         }
-        ImGui::EndPopup();
+        ui::endDialog();
     }
 
     bool anyApp = false;
@@ -7448,9 +7482,10 @@ void App::renderBackupManagerWindow() {
         if (row.selected && row.isJob) selectedJobCount++;
 
     bool showBackupProgress = m_backupProgressActive || (!m_backupProgressStageLabel.empty() && m_asyncBusy.load());
-    float bottomBarH = showBackupProgress
-        ? (ImGui::GetFrameHeightWithSpacing() * (!m_backupAppProgress.empty() ? 6.0f : 4.0f) + 18.0f)
-        : (52 * s);
+    const bool backupCardHasAppRow = m_backupProgressTotalBytes == 0 && !m_backupAppProgress.empty() &&
+        m_backupProgressActiveAppIndex >= 0;
+    const float backupCardHeight = (backupCardHasAppRow ? 182.0f : 142.0f) * s;
+    float bottomBarH = showBackupProgress ? 46 * s + backupCardHeight + 12 * s : 52 * s;
     float availableY = ImGui::GetContentRegionAvail().y;
     float bodyH = availableY - bottomBarH - ImGui::GetStyle().ItemSpacing.y;
     if (bodyH < 80.0f) bodyH = 80.0f;
@@ -8013,21 +8048,21 @@ void App::renderBackupManagerWindow() {
     ImGui::EndDisabled();
     if (m_backupProgressActive) {
         const char* operation = m_backupProgressIsRestore ? "Restore" : "Backup";
-        ImGui::SameLine();
         bool paused = m_backupPauseRequested.load();
         std::string pauseLabel = paused ? "Resume " : "Pause ";
         pauseLabel += operation;
-        if (modernButton(pauseLabel.c_str())) {
+        if (theme.button("##BackupPauseAction", pauseLabel.c_str(), paused ? ui::Icon::Play : ui::Icon::Pause,
+            ImVec2(actions.x + 476 * s, actions.y), ImVec2(150 * s, 34 * s), theme.text)) {
             m_backupPauseRequested = !paused;
             m_backupProgressStageLabel = paused ? std::string("Resuming ") + operation :
                 std::string(operation) + " paused";
             m_backupControlCV.notify_all();
         }
-        ImGui::SameLine();
         ImGui::BeginDisabled(m_backupCancelRequested.load());
         std::string stopLabel = "Stop ";
         stopLabel += operation;
-        if (modernButton(stopLabel.c_str())) {
+        if (theme.button("##BackupStopAction", stopLabel.c_str(), ui::Icon::Close,
+            ImVec2(actions.x + 636 * s, actions.y), ImVec2(136 * s, 34 * s), theme.red, 3)) {
             m_backupCancelRequested = true;
             m_backupPauseRequested = false;
             m_backupProgressStageLabel = std::string("Stopping ") + operation;
@@ -8053,169 +8088,168 @@ void App::renderBackupManagerWindow() {
         ImGui::GetWindowWidth() - usedWidth - 24 * s);
     theme.status(ImVec2(ImGui::GetWindowPos().x + ImGui::GetWindowWidth() - statusW - 6 * s, actions.y + 9 * s),
         statusText, hasDevice, statusW);
-    ImGui::SetCursorScreenPos(ImVec2(actions.x, actions.y + 43 * s));
+    ImGui::SetCursorScreenPos(ImVec2(actions.x, actions.y + 46 * s));
 
-    if (showBackupProgress && !m_backupAppProgress.empty()) {
-        if (m_backupProgressTotalBytes > 0) {
-            const float uploadFraction = std::clamp(
-                (float)m_backupProgressBytes / (float)m_backupProgressTotalBytes, 0.0f, 1.0f);
-            const char* transferHeading = m_backupProgressIsRestore
-                ? "Restore archive upload"
-                : "Backup archive download";
-            const float headingWidth = ImGui::CalcTextSize(transferHeading).x;
-            ImGui::SetCursorPosX(std::max(8.0f, (ImGui::GetWindowWidth() - headingWidth) * 0.5f));
-            ImGui::TextColored(ImVec4(0.38f, 0.74f, 1.0f, 1.0f), "%s", transferHeading);
-            ImGui::SetCursorPosX(8.0f);
-            char uploadText[64];
-            snprintf(uploadText, sizeof(uploadText), "%.0f%%", uploadFraction * 100.0f);
-            ImGui::ProgressBar(uploadFraction, ImVec2(-8.0f, 22.0f), uploadText);
+    if (showBackupProgress) {
+        const bool restore = m_backupProgressIsRestore;
+        const bool paused = m_backupPauseRequested.load();
+        const bool archiveTransfer = m_backupProgressTotalBytes > 0;
+        const bool perAppView = !archiveTransfer && !m_backupAppProgress.empty();
 
-            struct UploadChip {
-                std::string text;
-                ImU32 background;
-                ImU32 border;
-                ImU32 foreground;
-            };
-            std::vector<UploadChip> chips;
-            chips.push_back({m_backupProgressStageLabel,
-                IM_COL32(20, 55, 88, 235), IM_COL32(55, 135, 205, 230), IM_COL32(130, 204, 255, 255)});
-            chips.push_back({formatSize(m_backupProgressBytes) + " / " + formatSize(m_backupProgressTotalBytes),
-                IM_COL32(42, 45, 67, 235), IM_COL32(91, 101, 151, 220), IM_COL32(207, 215, 244, 255)});
-            const bool rateFresh = m_backupProgressLastTransferUpdate.time_since_epoch().count() != 0 &&
-                std::chrono::steady_clock::now() - m_backupProgressLastTransferUpdate < std::chrono::seconds(2) &&
-                !m_backupPauseRequested.load();
-            if (rateFresh && m_backupProgressBytesPerSecond > 0.0) {
-                chips.push_back({formatSpeed(m_backupProgressBytesPerSecond),
-                    IM_COL32(18, 67, 49, 240), IM_COL32(46, 163, 111, 230), IM_COL32(112, 238, 171, 255)});
-                if (m_backupProgressEtaSeconds > 0.5) {
-                    chips.push_back({"ETA " + formatETA(m_backupProgressEtaSeconds),
-                        IM_COL32(73, 57, 16, 240), IM_COL32(190, 143, 33, 230), IM_COL32(255, 207, 92, 255)});
-                }
-            }
-
-            const float chipPaddingX = 11.0f;
-            const float chipHeight = 25.0f;
-            const float chipSpacing = 7.0f;
-            const float availableWidth = std::max(1.0f, ImGui::GetContentRegionAvail().x - 16.0f);
-            ImVec2 rowOrigin = ImGui::GetCursorScreenPos();
-            rowOrigin.x += 8.0f;
-            ImDrawList* drawList = ImGui::GetWindowDrawList();
-            std::vector<std::vector<size_t>> rows(1);
-            std::vector<float> rowWidths(1, 0.0f);
-            for (size_t index = 0; index < chips.size(); ++index) {
-                float width = ImGui::CalcTextSize(chips[index].text.c_str()).x + chipPaddingX * 2.0f;
-                float proposed = rowWidths.back() + (rows.back().empty() ? 0.0f : chipSpacing) + width;
-                if (!rows.back().empty() && proposed > availableWidth) {
-                    rows.emplace_back();
-                    rowWidths.push_back(0.0f);
-                }
-                if (!rows.back().empty()) rowWidths.back() += chipSpacing;
-                rows.back().push_back(index);
-                rowWidths.back() += width;
-            }
-            for (size_t row = 0; row < rows.size(); ++row) {
-                float x = rowOrigin.x + std::max(0.0f, (availableWidth - rowWidths[row]) * 0.5f);
-                float y = rowOrigin.y + (float)row * (chipHeight + 5.0f);
-                for (size_t index : rows[row]) {
-                    const UploadChip& chip = chips[index];
-                    ImVec2 textSize = ImGui::CalcTextSize(chip.text.c_str());
-                    float width = textSize.x + chipPaddingX * 2.0f;
-                    ImVec2 minimum(x, y);
-                    ImVec2 maximum(x + width, y + chipHeight);
-                    drawList->AddRectFilled(minimum, maximum, chip.background, 7.0f);
-                    drawList->AddRect(minimum, maximum, chip.border, 7.0f, 0, 1.0f);
-                    drawList->AddText(ImVec2(x + chipPaddingX, y + (chipHeight - textSize.y) * 0.5f),
-                                      chip.foreground, chip.text.c_str());
-                    x += width + chipSpacing;
-                }
-            }
-            ImGui::Dummy(ImVec2(0.0f, (float)rows.size() * (chipHeight + 5.0f)));
-        } else {
         float smoothing = std::clamp(ImGui::GetIO().DeltaTime * 7.0f, 0.0f, 1.0f);
-        if (m_backupDisplayedAppProgress.size() != m_backupAppProgress.size())
-            m_backupDisplayedAppProgress.assign(m_backupAppProgress.size(), 0.0f);
-        float targetOverall = 0.0f;
-        for (size_t i = 0; i < m_backupAppProgress.size(); ++i) {
-            m_backupDisplayedAppProgress[i] +=
-                (m_backupAppProgress[i] - m_backupDisplayedAppProgress[i]) * smoothing;
-            targetOverall += m_backupAppProgress[i];
-        }
-        targetOverall /= (float)m_backupAppProgress.size();
-        m_backupDisplayedOverallProgress +=
-            (targetOverall - m_backupDisplayedOverallProgress) * smoothing;
+        float overall = 0.0f;
+        int appIndex = -1;
+        int appsDone = 0;
+        int appsTotal = std::max(1, m_backupProgressTotal);
+        std::string title;
+        std::string subtitle;
 
-        int appIndex = m_backupProgressActiveAppIndex;
-        if (appIndex < 0 || appIndex >= (int)m_backupAppProgress.size() || !m_backupAppActive[appIndex])
-            appIndex = -1;
-        if (appIndex < 0) {
-            for (int i = (int)m_backupAppProgress.size() - 1; i >= 0; --i) {
-                if (m_backupAppActive[i]) { appIndex = i; break; }
+        if (archiveTransfer) {
+            overall = std::clamp((float)m_backupProgressBytes / (float)m_backupProgressTotalBytes, 0.0f, 1.0f);
+            title = restore ? "Uploading restore archive" : "Downloading backup archive";
+            subtitle = restore ? "Sending your backup to the phone" : "Saving the device archive to this PC";
+        } else if (perAppView) {
+            if (m_backupDisplayedAppProgress.size() != m_backupAppProgress.size())
+                m_backupDisplayedAppProgress.assign(m_backupAppProgress.size(), 0.0f);
+            float targetOverall = 0.0f;
+            for (size_t i = 0; i < m_backupAppProgress.size(); ++i) {
+                m_backupDisplayedAppProgress[i] +=
+                    (m_backupAppProgress[i] - m_backupDisplayedAppProgress[i]) * smoothing;
+                targetOverall += m_backupAppProgress[i];
+                if (m_backupAppProgress[i] >= 0.999f) ++appsDone;
             }
-        }
+            targetOverall /= (float)m_backupAppProgress.size();
+            m_backupDisplayedOverallProgress +=
+                (targetOverall - m_backupDisplayedOverallProgress) * smoothing;
+            overall = m_backupDisplayedOverallProgress;
+            appsTotal = (int)m_backupAppProgress.size();
+            if (!restore) appsDone = std::clamp(m_backupProgressCurrent, 0, appsTotal);
 
-        ImGui::SetCursorPosX(8.0f);
-        if (m_backupProgressIsRestore)
-            ImGui::TextDisabled("Total restore progress");
-        else
-            ImGui::TextDisabled("Total progress  %d of %d apps finished",
-                std::clamp(m_backupProgressCurrent, 0, m_backupProgressTotal), m_backupProgressTotal);
-        ImGui::SetCursorPosX(8.0f);
-        char totalText[64];
-        snprintf(totalText, sizeof(totalText), "%.0f%%", m_backupDisplayedOverallProgress * 100.0f);
-        drawProgressBar(m_backupDisplayedOverallProgress, totalText, 22.0f,
-            ImVec4(0.95f, 0.72f, 0.0f, 1.0f), ImVec4(0.04f, 0.05f, 0.08f, 1.0f));
-
-        if (appIndex >= 0 && appIndex < (int)m_backupProgressPackages.size()) {
-            ImGui::SetCursorPosX(8.0f);
-            ImGui::TextDisabled("App progress  %s", m_backupProgressPackages[appIndex].c_str());
-            ImGui::SetCursorPosX(8.0f);
-            char appText[64];
-            snprintf(appText, sizeof(appText), "%.0f%%", m_backupDisplayedAppProgress[appIndex] * 100.0f);
-            drawProgressBar(m_backupDisplayedAppProgress[appIndex], appText, 20.0f,
-                ImVec4(0.95f, 0.72f, 0.0f, 1.0f), ImVec4(0.04f, 0.05f, 0.08f, 1.0f));
-        }
-        ImGui::SetCursorPosX(8.0f);
-        if (!m_backupProgressStageLabel.empty()) ImGui::TextDisabled("%s", m_backupProgressStageLabel.c_str());
-        }
-    } else if (showBackupProgress) {
-        int totalApps = std::max(1, m_backupProgressTotal);
-        int stageTotal = std::max(1, m_backupProgressStageTotal);
-        float stageFraction = (float)std::clamp(m_backupProgressStage, 0, stageTotal) / (float)stageTotal;
-        if (m_backupProgressTotalBytes > 0) {
-            stageFraction = ((float)m_backupProgressStage + std::clamp((float)m_backupProgressBytes / (float)m_backupProgressTotalBytes, 0.0f, 1.0f)) / (float)stageTotal;
-        }
-        float overallFraction = ((float)std::clamp(m_backupProgressCurrent, 0, totalApps) + std::clamp(stageFraction, 0.0f, 1.0f)) / (float)totalApps;
-        overallFraction = std::clamp(overallFraction, 0.0f, 1.0f);
-
-        ImGui::SetCursorPosX(8.0f);
-        std::string line = std::string(m_backupProgressIsRestore ? "Restore " : "Backup ") +
-            std::to_string(std::min(m_backupProgressCurrent + 1, totalApps)) + " of " +
-            std::to_string(totalApps);
-        if (!m_backupProgressPackage.empty()) line += "  " + m_backupProgressPackage;
-        ImGui::TextDisabled("%s", line.c_str());
-
-        ImGui::SetCursorPosX(8.0f);
-        char overallText[64];
-        snprintf(overallText, sizeof(overallText), "%.0f%%", overallFraction * 100.0f);
-        ImGui::ProgressBar(overallFraction, ImVec2(-8.0f, 22.0f), overallText);
-
-        ImGui::SetCursorPosX(8.0f);
-        std::string stageLine;
-        if (!m_backupProgressStageLabel.empty()) stageLine = m_backupProgressStageLabel;
-        if (m_backupProgressBytes > 0) {
-            if (!stageLine.empty()) stageLine += "  ";
-            stageLine += formatSize(m_backupProgressBytes);
-            if (m_backupProgressTotalBytes > 0) stageLine += " / " + formatSize(m_backupProgressTotalBytes);
-            const bool rateFresh = m_backupProgressLastTransferUpdate.time_since_epoch().count() != 0 &&
-                std::chrono::steady_clock::now() - m_backupProgressLastTransferUpdate < std::chrono::seconds(2) &&
-                !m_backupPauseRequested.load();
-            if (rateFresh && m_backupProgressBytesPerSecond > 0.0) {
-                stageLine += "  " + formatSpeed(m_backupProgressBytesPerSecond);
-                if (m_backupProgressEtaSeconds > 0.5)
-                    stageLine += "  ETA " + formatETA(m_backupProgressEtaSeconds);
+            appIndex = m_backupProgressActiveAppIndex;
+            if (appIndex < 0 || appIndex >= (int)m_backupAppProgress.size() || !m_backupAppActive[appIndex])
+                appIndex = -1;
+            if (appIndex < 0) {
+                for (int i = (int)m_backupAppProgress.size() - 1; i >= 0; --i)
+                    if (m_backupAppActive[i]) { appIndex = i; break; }
             }
+            if (appIndex >= (int)m_backupProgressPackages.size()) appIndex = -1;
+            title = restore ? "Restoring apps" : "Backing up apps";
+            subtitle = m_backupProgressStageLabel;
+        } else {
+            int stageTotal = std::max(1, m_backupProgressStageTotal);
+            float stageFraction = (float)std::clamp(m_backupProgressStage, 0, stageTotal) / (float)stageTotal;
+            overall = std::clamp(((float)std::clamp(m_backupProgressCurrent, 0, appsTotal) +
+                std::clamp(stageFraction, 0.0f, 1.0f)) / (float)appsTotal, 0.0f, 1.0f);
+            appsDone = std::clamp(m_backupProgressCurrent, 0, appsTotal);
+            title = std::string(restore ? "Restoring " : "Backing up ") +
+                std::to_string(std::min(m_backupProgressCurrent + 1, appsTotal)) + " of " + std::to_string(appsTotal);
+            subtitle = m_backupProgressPackage.empty() ? m_backupProgressStageLabel
+                : m_backupProgressPackage + (m_backupProgressStageLabel.empty() ? "" : "  |  " + m_backupProgressStageLabel);
         }
-        if (!stageLine.empty()) ImGui::TextDisabled("%s", stageLine.c_str());
+        if (paused) subtitle = std::string(restore ? "Restore" : "Backup") + " paused";
+        if (subtitle.empty()) subtitle = "Preparing...";
+
+        const bool finished = overall >= 0.999f;
+        const ImVec4 trackFrom = paused ? theme.gold : finished ? theme.green : m_theme.gradientPrimary;
+        const ImVec4 trackTo = paused ? ui::mix(theme.gold, ui::rgb(255, 140, 40), 0.4f)
+            : finished ? ui::mix(theme.green, theme.blue, 0.35f) : m_theme.gradientSecondary;
+        const ImVec4 accent = paused ? theme.gold : finished ? theme.green : theme.blue;
+
+        const ImVec2 cardPos = ImGui::GetCursorScreenPos();
+        const float cardW = std::max(240 * s, ImGui::GetContentRegionAvail().x - 2 * s);
+        const float pad = 16 * s;
+        const float cardH = backupCardHeight;
+        theme.box(cardPos, ImVec2(cardW, cardH), theme.raised, theme.surface, ui::withAlpha(accent, 0.45f), 12);
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        const float innerW = cardW - pad * 2;
+        float y = cardPos.y + pad;
+        const float x = cardPos.x + pad;
+
+        // Header: icon tile, title and subtitle, large percentage on the right.
+        const float tileSize = 40 * s;
+        draw->AddRectFilled(ImVec2(x, y), ImVec2(x + tileSize, y + tileSize), theme.color(ui::withAlpha(accent, 0.15f)), 10 * s);
+        ui::icon(archiveTransfer ? (restore ? ui::Icon::Up : ui::Icon::Down) : (restore ? ui::Icon::Refresh : ui::Icon::Backup),
+            ImVec2(x + 9 * s, y + 9 * s), 22 * s, theme.color(accent));
+        char percentText[16];
+        snprintf(percentText, sizeof(percentText), "%.0f%%", overall * 100.0f);
+        ImFont* percentFont = ui::connectionHeadingFont ? ui::connectionHeadingFont : ImGui::GetFont();
+        const float percentSize = 26 * s;
+        const float percentW = percentFont->CalcTextSizeA(percentSize, FLT_MAX, 0, percentText).x;
+        draw->AddText(percentFont, percentSize, ImVec2(x + innerW - percentW, y + (tileSize - percentSize) * 0.5f),
+            theme.color(theme.text), percentText);
+        const float textX = x + tileSize + 14 * s;
+        const float textW = innerW - tileSize - 14 * s - percentW - 16 * s;
+        theme.label(ImVec2(textX, y + 1 * s), title, textW, theme.text, 15, true);
+        theme.label(ImVec2(textX, y + 22 * s), subtitle, textW, theme.muted, 13);
+        y += tileSize + 14 * s;
+
+        ui::progressTrack(ImVec2(x, y), innerW, 8 * s, overall, trackFrom, trackTo);
+        y += 8 * s + 16 * s;
+
+        if (backupCardHasAppRow && appIndex >= 0) {
+            const float appFraction = std::clamp(m_backupDisplayedAppProgress[appIndex], 0.0f, 1.0f);
+            char appPercent[16];
+            snprintf(appPercent, sizeof(appPercent), "%.0f%%", appFraction * 100.0f);
+            const float appPercentW = ImGui::CalcTextSize(appPercent).x;
+            theme.label(ImVec2(x, y), "CURRENT APP", 110 * s, theme.muted, 11, true);
+            theme.label(ImVec2(x + 110 * s, y - 1 * s), m_backupProgressPackages[appIndex],
+                innerW - 110 * s - appPercentW - 12 * s, theme.text, 13, true);
+            draw->AddText(ImVec2(x + innerW - appPercentW, y - 1 * s), theme.color(theme.muted), appPercent);
+            y += 20 * s;
+            ui::progressTrack(ImVec2(x, y), innerW, 4 * s, appFraction, ui::withAlpha(trackFrom, 0.85f), ui::withAlpha(trackTo, 0.85f));
+            y += 4 * s + 16 * s;
+        }
+
+        // Stats row.
+        draw->AddLine(ImVec2(x, y - 6 * s), ImVec2(x + innerW, y - 6 * s), theme.color(ui::withAlpha(theme.border, 0.7f)), 1.0f);
+        y += 4 * s;
+        const bool rateFresh = m_backupProgressLastTransferUpdate.time_since_epoch().count() != 0 &&
+            std::chrono::steady_clock::now() - m_backupProgressLastTransferUpdate < std::chrono::seconds(2) && !paused;
+        struct Stat { const char* label; std::string value; ImVec4 ink; };
+        std::vector<Stat> stats;
+        if (archiveTransfer || m_backupProgressBytes > 0) {
+            std::string moved = formatSize(m_backupProgressBytes);
+            if (m_backupProgressTotalBytes > 0) moved += " of " + formatSize(m_backupProgressTotalBytes);
+            stats.push_back({"TRANSFERRED", moved, theme.text});
+            stats.push_back({"SPEED", rateFresh && m_backupProgressBytesPerSecond > 0.0
+                ? formatSpeed(m_backupProgressBytesPerSecond) : std::string(paused ? "Paused" : "Measuring..."), theme.green});
+            stats.push_back({"TIME LEFT", rateFresh && m_backupProgressEtaSeconds > 0.5
+                ? formatETA(m_backupProgressEtaSeconds) : std::string(finished ? "Done" : "Estimating..."), theme.gold});
+        } else {
+            stats.push_back({"APPS", std::to_string(appsDone) + " of " + std::to_string(appsTotal) + " done", theme.text});
+            stats.push_back({"STAGE", m_backupProgressStageLabel.empty() ? std::string("Working") : m_backupProgressStageLabel, theme.text});
+        }
+        const bool showPipes = archiveTransfer && (m_backupProgressUsbPipes + m_backupProgressWifiPipes) > 0;
+        const int columns = (int)stats.size() + (showPipes ? 1 : 0);
+        const float columnW = innerW / (float)std::max(1, columns);
+        for (size_t i = 0; i < stats.size(); ++i) {
+            const float cx = x + columnW * (float)i;
+            theme.label(ImVec2(cx, y), stats[i].label, columnW - 12 * s, theme.muted, 11, true);
+            theme.label(ImVec2(cx, y + 17 * s), stats[i].value, columnW - 12 * s, stats[i].ink, 14, true);
+        }
+        if (showPipes) {
+            const float cx = x + columnW * (float)stats.size();
+            theme.label(ImVec2(cx, y), "CONNECTION", columnW, theme.muted, 11, true);
+            float px = cx;
+            auto pipePill = [&](ui::Icon glyph, const char* name, int count) {
+                const bool active = count > 0;
+                const ImVec4 ink = active ? theme.blue : theme.muted;
+                const std::string text = std::string(name) + " x" + std::to_string(count);
+                const float textWidth = ImGui::CalcTextSize(text.c_str()).x;
+                const float pillW = 14 * s + 6 * s + textWidth + 18 * s;
+                const ImVec2 pillMin(px, y + 15 * s);
+                const ImVec2 pillMax(px + pillW, y + 15 * s + 22 * s);
+                draw->AddRectFilled(pillMin, pillMax, theme.color(ui::withAlpha(ink, active ? 0.14f : 0.08f)), 11 * s);
+                draw->AddRect(pillMin, pillMax, theme.color(ui::withAlpha(ink, active ? 0.45f : 0.25f)), 11 * s, 0, 1.0f);
+                ui::icon(glyph, ImVec2(px + 9 * s, pillMin.y + 4 * s), 14 * s, theme.color(ink));
+                draw->AddText(ImVec2(px + 9 * s + 14 * s + 6 * s, pillMin.y + (22 * s - ImGui::GetTextLineHeight()) * 0.5f),
+                    theme.color(ink), text.c_str());
+                px += pillW + 6 * s;
+            };
+            pipePill(ui::Icon::Usb, "USB", m_backupProgressUsbPipes);
+            pipePill(ui::Icon::Wifi, "WiFi", m_backupProgressWifiPipes);
+        }
+        ImGui::Dummy(ImVec2(cardW, cardH));
     }
     ImGui::EndChild();
     ImGui::PopStyleColor();
@@ -8291,77 +8325,50 @@ void App::renderCopyMoveDialog() {
     if (!m_showCopyMoveDialog || !m_pendingBatch) return;
 
     ImGui::OpenPopup("Copy or Move?");
-    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
-    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (!ui::beginDialog("Copy or Move?", 480)) return;
 
-    if (ImGui::BeginPopupModal("Copy or Move?", &m_showCopyMoveDialog,
-            ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse)) {
-        int fileCount = (int)m_pendingBatch->files.size();
-        if (fileCount == 1)
-            ImGui::Text("%s", m_pendingBatch->files[0].displayName.c_str());
-        else
-            ImGui::Text("%d files selected", fileCount);
+    const int fileCount = (int)m_pendingBatch->files.size();
+    const std::string selection = fileCount == 1 ? m_pendingBatch->files[0].displayName
+        : std::to_string(fileCount) + " files selected";
+    const bool cancel = ui::dialogHeader(ui::Icon::Transfer, ui::accentColor(ui::Accent::Info),
+        "Copy or move?", selection, true);
 
-        ImGui::Spacing();
-
-        // Check if same partition (for local copies — suggest move)
-        bool sameDrive = false;
-        if (m_pendingBatch->isLocalCopy && fileCount > 0) {
-            auto& src = m_pendingBatch->files[0].sourcePath;
-            auto& dst = m_pendingBatch->files[0].destPath;
-            if (src.size() >= 2 && dst.size() >= 2)
-                sameDrive = (toupper(src[0]) == toupper(dst[0]));
-            if (sameDrive)
-                ImGui::TextDisabled("Same drive — move will be instant");
-        }
-
-        ImGui::Spacing();
-
-        float buttonW = 120.0f;
-        float spacing = ImGui::GetStyle().ItemSpacing.x;
-        float totalW = buttonW * 2 + spacing;
-        ImGui::SetCursorPosX((ImGui::GetWindowWidth() - totalW) * 0.5f);
-
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.35f, 0.55f, 1));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.45f, 0.70f, 1));
-        if (modernButton("Copy", ImVec2(buttonW, 30))) {
-            m_pendingBatch->isMove = false;
-            {
-                std::lock_guard<std::mutex> lk(m_batchMutex);
-                prepareTransferManifest(m_pendingBatch);
-                m_batchQueue.push_back(m_pendingBatch);
-            }
-            m_batchCV.notify_one();
-            m_overlayWasOpen = false;
-            m_pendingBatch.reset();
-            m_showCopyMoveDialog = false;
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::PopStyleColor(2);
-
-        ImGui::SameLine();
-
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.40f, 0.35f, 0.10f, 1));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.55f, 0.50f, 0.15f, 1));
-        if (modernButton("Move", ImVec2(buttonW, 30))) {
-            m_pendingBatch->isMove = true;
-            {
-                std::lock_guard<std::mutex> lk(m_batchMutex);
-                prepareTransferManifest(m_pendingBatch);
-                m_batchQueue.push_back(m_pendingBatch);
-            }
-            m_batchCV.notify_one();
-            m_overlayWasOpen = false;
-            m_pendingBatch.reset();
-            m_showCopyMoveDialog = false;
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::PopStyleColor(2);
-
-        ImGui::EndPopup();
+    // Moves within one drive are a rename, so they finish instantly.
+    bool sameDrive = false;
+    if (m_pendingBatch->isLocalCopy && fileCount > 0) {
+        auto& src = m_pendingBatch->files[0].sourcePath;
+        auto& dst = m_pendingBatch->files[0].destPath;
+        if (src.size() >= 2 && dst.size() >= 2)
+            sameDrive = (toupper(src[0]) == toupper(dst[0]));
     }
-}
 
+    auto queueBatch = [&](bool move) {
+        m_pendingBatch->isMove = move;
+        {
+            std::lock_guard<std::mutex> lk(m_batchMutex);
+            prepareTransferManifest(m_pendingBatch);
+            m_batchQueue.push_back(m_pendingBatch);
+        }
+        m_batchCV.notify_one();
+        m_overlayWasOpen = false;
+        m_pendingBatch.reset();
+        m_showCopyMoveDialog = false;
+        ImGui::CloseCurrentPopup();
+    };
+
+    if (ui::choiceCard("##CopyChoice", ui::Icon::Copy, ui::accentColor(ui::Accent::Info), "Copy",
+            "Keep the originals and place a copy in the destination.")) {
+        queueBatch(false);
+    } else if (ui::choiceCard("##MoveChoice", ui::Icon::Move, ui::accentColor(ui::Accent::Warning), "Move",
+            sameDrive ? "Same drive, so the move finishes instantly." : "Transfer the items and remove them from the source.",
+            0, sameDrive ? "Instant" : nullptr)) {
+        queueBatch(true);
+    } else if (cancel) {
+        m_showCopyMoveDialog = false;
+        ImGui::CloseCurrentPopup();
+    }
+    ui::endDialog();
+}
 
 void App::tryAutoWifiConnect(const std::string& serial) {
     if (m_wifiAutoSetupDone || m_dualChannelAvailable) return;
@@ -8612,68 +8619,50 @@ void App::renderCrossDeviceDialog() {
     if (!m_showCrossDeviceDialog || !m_pendingBatch) return;
 
     ImGui::OpenPopup("Cross-Device Transfer");
-    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
-    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (!ui::beginDialog("Cross-Device Transfer", 520)) return;
 
-    if (ImGui::BeginPopupModal("Cross-Device Transfer", &m_showCrossDeviceDialog,
-            ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse)) {
-        int fileCount = (int)m_pendingBatch->files.size();
-        ImGui::Text("Transfer %d file(s) between devices", fileCount);
-        ImGui::Spacing();
+    const int fileCount = (int)m_pendingBatch->files.size();
+    const bool cancel = ui::dialogHeader(ui::Icon::Transfer, ui::accentColor(ui::Accent::Info),
+        "Transfer between devices",
+        std::to_string(fileCount) + (fileCount == 1 ? " file" : " files") + " selected. Choose a transfer method.", true);
 
-        ImGui::TextColored(ImVec4(0.45f, 0.70f, 1, 1), "Choose transfer method:");
-        ImGui::Spacing();
-
-        bool dokanAvailable = m_pendingBatch &&
-            DeviceMountManager::instance(m_pendingBatch->srcDeviceSlot).isMounted();
-
-        // Fast PC relay option
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.35f, 0.55f, 1));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.45f, 0.70f, 1));
-        if (modernButton("Fast via PC (multi-channel)", ImVec2(250, 0))) {
-            m_pendingBatch->useDokanRelay = false;
-            {
-                std::lock_guard<std::mutex> lk(m_batchMutex);
-                prepareTransferManifest(m_pendingBatch);
-                m_batchQueue.push_back(m_pendingBatch);
-            }
-            m_batchCV.notify_one();
-            m_overlayWasOpen = false;
-            m_pendingBatch.reset();
-            m_showCrossDeviceDialog = false;
-            ImGui::CloseCurrentPopup();
+    const bool dokanAvailable = DeviceMountManager::instance(m_pendingBatch->srcDeviceSlot).isMounted();
+    auto queueBatch = [&](bool useDokanRelay) {
+        m_pendingBatch->useDokanRelay = useDokanRelay;
+        {
+            std::lock_guard<std::mutex> lk(m_batchMutex);
+            prepareTransferManifest(m_pendingBatch);
+            m_batchQueue.push_back(m_pendingBatch);
         }
-        ImGui::PopStyleColor(2);
-        ImGui::TextDisabled("  Streams chunks through the PC and uses\n  available USB and WiFi channels.");
+        m_batchCV.notify_one();
+        m_overlayWasOpen = false;
+        m_pendingBatch.reset();
+        m_showCrossDeviceDialog = false;
+        ImGui::CloseCurrentPopup();
+    };
 
-        ImGui::Spacing();
-
-        // Compatibility streaming option
-        ImGui::BeginDisabled(!dokanAvailable);
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.25f, 0.25f, 0.30f, 1));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.35f, 0.35f, 0.42f, 1));
-        if (modernButton("Compatibility stream", ImVec2(250, 0))) {
-            m_pendingBatch->useDokanRelay = true;
-            {
-                std::lock_guard<std::mutex> lk(m_batchMutex);
-                prepareTransferManifest(m_pendingBatch);
-                m_batchQueue.push_back(m_pendingBatch);
-            }
-            m_batchCV.notify_one();
-            m_overlayWasOpen = false;
-            m_pendingBatch.reset();
-            m_showCrossDeviceDialog = false;
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::PopStyleColor(2);
-        ImGui::EndDisabled();
-        if (dokanAvailable)
-            ImGui::TextDisabled("  Single stream through the PC.\n  Use only if fast mode has trouble.");
-        else
-            ImGui::TextDisabled("  Not available, mount device A via Dokan first\n  (Connection > Mount as Drive).");
-
-        ImGui::EndPopup();
+    bool chosen = false;
+    if (ui::choiceCard("##FastRelay", ui::Icon::Transfer, ui::accentColor(ui::Accent::Info), "Fast via PC",
+            "Streams chunks through the PC and uses every available USB and WiFi channel.", 0, "Recommended")) {
+        queueBatch(false);
+        chosen = true;
     }
+    if (!chosen) {
+        ImGui::BeginDisabled(!dokanAvailable);
+        if (ui::choiceCard("##CompatibilityRelay", ui::Icon::Link, ui::accentColor(ui::Accent::Warning),
+                "Compatibility stream",
+                dokanAvailable ? "Single stream through the PC. Use only if fast mode has trouble."
+                               : "Mount the source device as a drive first (Connection > Mount as Drive).")) {
+            queueBatch(true);
+            chosen = true;
+        }
+        ImGui::EndDisabled();
+    }
+    if (!chosen && cancel) {
+        m_showCrossDeviceDialog = false;
+        ImGui::CloseCurrentPopup();
+    }
+    ui::endDialog();
 }
 
 void App::renderAboutPopup() {
@@ -8682,36 +8671,34 @@ void App::renderAboutPopup() {
         m_showAboutPopup = false;
     }
 
-    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
-    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(ImVec2(360, 0), ImGuiCond_Appearing);
+    if (ui::beginDialog("About##AboutPopup", 420)) {
+        const float s = ui::scale();
+        ui::PanelStyle theme(m_resolvedLightTheme);
+        bool close = ui::dialogHeader(ui::Icon::Phone, ui::accentColor(ui::Accent::Info),
+            "Fast Enough? - Android File Explorer", "Version 1.0.23", true);
 
-    if (ImGui::BeginPopupModal("About##AboutPopup", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove)) {
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.45f, 0.70f, 1.00f, 1.00f));
-        ImGui::SetCursorPosX((ImGui::GetWindowWidth() - ImGui::CalcTextSize("Fast Enough? - Android File Explorer").x) * 0.5f);
-        ImGui::Text("Fast Enough? - Android File Explorer");
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, theme.background);
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 10 * s);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14 * s, 12 * s));
+        ImGui::BeginChild("##AboutDetails", ImVec2(0, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY);
+        auto row = [&](const char* label, const char* value) {
+            ImGui::PushStyleColor(ImGuiCol_Text, theme.muted);
+            ImGui::TextUnformatted(label);
+            ImGui::PopStyleColor();
+            ImGui::SameLine(110 * s);
+            ImGui::TextUnformatted(value);
+        };
+        row("Build date", __DATE__);
+        row("Made by", "JohnTheFarm3r");
+        ImGui::EndChild();
+        ImGui::PopStyleVar(2);
         ImGui::PopStyleColor();
 
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        ImGui::Text("Version: 1.0.23");
-        ImGui::Text("Build date: %s", __DATE__);
-        ImGui::Spacing();
-        ImGui::Text("Made by: JohnTheFarm3r");
-
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        float buttonWidth = 120.0f;
-        ImGui::SetCursorPosX((ImGui::GetWindowWidth() - buttonWidth) * 0.5f);
-        if (modernButton("Close", ImVec2(buttonWidth, 0))) {
+        const float buttonW = 110 * s;
+        ui::dialogFooter(buttonW);
+        if (modernButton("Close##AboutClose", ImVec2(buttonW, ui::footerButtonHeight()), ButtonTone::Primary) || close)
             ImGui::CloseCurrentPopup();
-        }
-
-        ImGui::EndPopup();
+        ui::endDialog();
     }
 }
 
@@ -8733,106 +8720,97 @@ void App::renderNotificationPopup() {
     if (show) {
         ImGui::OpenPopup("##NotificationPopup");
     }
-    bool isBackupResult = title.rfind("Backup ", 0) == 0 || title.rfind("Restore ", 0) == 0;
-    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
-    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    if (isBackupResult) {
-        ImVec2 viewport = ImGui::GetMainViewport()->WorkSize;
-        ImGui::SetNextWindowSize(ImVec2(std::min(720.0f, viewport.x * 0.82f),
-            std::min(500.0f, viewport.y * 0.78f)), ImGuiCond_Appearing);
-        ImGui::SetNextWindowSizeConstraints(ImVec2(520, 360), ImVec2(viewport.x * 0.92f, viewport.y * 0.90f));
-    } else {
-        ImGui::SetNextWindowSize(ImVec2(420, 0));
-    }
-    ImGuiWindowFlags popupFlags = ImGuiWindowFlags_NoTitleBar;
-    if (!isBackupResult) popupFlags |= ImGuiWindowFlags_AlwaysAutoResize;
-    if (ImGui::BeginPopupModal("##NotificationPopup", nullptr, popupFlags)) {
-        if (isBackupResult) {
-            ImVec4 accent = isError ? ImVec4(1.0f, 0.35f, 0.35f, 1.0f) : ImVec4(0.25f, 0.90f, 0.55f, 1.0f);
-            ImGui::TextColored(accent, "%s", title.c_str());
-            ImGui::SameLine();
-            float closeX = ImGui::GetWindowWidth() - 42.0f;
-            if (closeX > ImGui::GetCursorPosX()) ImGui::SetCursorPosX(closeX);
-            if (modernSmallButton("X##CloseBackupResult")) ImGui::CloseCurrentPopup();
-            ImGui::TextDisabled("Backup Manager result");
-            ImGui::Spacing();
+    const float s = ui::scale();
+    const bool isBackupResult = title.rfind("Backup ", 0) == 0 || title.rfind("Restore ", 0) == 0;
+    const bool cancelled = title.find("Cancelled") != std::string::npos;
+    const float buttonH = ui::footerButtonHeight();
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const bool enterPressed = !show && (ImGui::IsKeyPressed(ImGuiKey_Enter) || ImGui::IsKeyPressed(ImGuiKey_KeypadEnter));
 
-            float cardGap = 12.0f;
-            float cardWidth = (ImGui::GetContentRegionAvail().x - cardGap) * 0.5f;
-            size_t firstBreak = message.find('\n');
-            std::string summary = firstBreak == std::string::npos ? message : message.substr(0, firstBreak);
-            if (summary.empty()) summary = "The operation finished.";
-            float cardInnerWidth = std::max(1.0f, cardWidth - ImGui::GetStyle().WindowPadding.x * 2.0f);
-            float statusContentHeight = ImGui::GetTextLineHeight() * 2.0f +
-                ImGui::GetStyle().ItemSpacing.y + ImGui::GetStyle().WindowPadding.y * 2.0f;
-            float summaryTextHeight = ImGui::CalcTextSize(summary.c_str(), nullptr, false, cardInnerWidth).y;
-            float summaryContentHeight = ImGui::GetTextLineHeight() + ImGui::GetStyle().ItemSpacing.y +
-                summaryTextHeight + ImGui::GetStyle().WindowPadding.y * 2.0f;
-            float cardHeight = std::ceil(std::max(statusContentHeight, summaryContentHeight) + 2.0f);
-            ImVec4 cardSurface = ImGui::GetStyleColorVec4(ImGuiCol_ChildBg);
-            ImVec4 statusSurface(cardSurface.x + (accent.x - cardSurface.x) * 0.12f,
-                cardSurface.y + (accent.y - cardSurface.y) * 0.12f,
-                cardSurface.z + (accent.z - cardSurface.z) * 0.12f, 1.0f);
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, statusSurface);
-            ImGui::BeginChild("##ResultStatusCard", ImVec2(cardWidth, cardHeight), ImGuiChildFlags_Borders,
-                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-            float statusGroupHeight = ImGui::GetTextLineHeight() * 2.0f + ImGui::GetStyle().ItemSpacing.y;
-            ImGui::SetCursorPosY(std::max(ImGui::GetStyle().WindowPadding.y,
-                (cardHeight - statusGroupHeight) * 0.5f));
-            ImGui::TextDisabled("STATUS");
-            const char* statusText = title.find("Cancelled") != std::string::npos ? "Cancelled" :
-                (isError ? "Completed with issues" : "Completed successfully");
-            ImGui::TextColored(accent, "%s", statusText);
-            ImGui::EndChild();
-            ImGui::PopStyleColor();
-
-            ImGui::SameLine(0, cardGap);
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, cardSurface);
-            ImGui::BeginChild("##ResultSummaryCard", ImVec2(0, cardHeight), ImGuiChildFlags_Borders,
-                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-            float summaryGroupHeight = ImGui::GetTextLineHeight() + ImGui::GetStyle().ItemSpacing.y + summaryTextHeight;
-            ImGui::SetCursorPosY(std::max(ImGui::GetStyle().WindowPadding.y,
-                (cardHeight - summaryGroupHeight) * 0.5f));
-            ImGui::TextDisabled("SUMMARY");
-            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + cardInnerWidth);
-            ImGui::TextUnformatted(summary.c_str());
-            ImGui::PopTextWrapPos();
-            ImGui::EndChild();
-            ImGui::PopStyleColor();
-
-            ImGui::Spacing();
-            ImGui::TextDisabled("DETAILS");
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImGui::GetStyleColorVec4(ImGuiCol_FrameBg));
-            ImGui::BeginChild("##ResultDetails", ImVec2(0, -58), ImGuiChildFlags_Borders,
-                ImGuiWindowFlags_AlwaysVerticalScrollbar);
-            ImGui::PushTextWrapPos(0.0f);
-            ImGui::TextUnformatted(message.empty() ? "No additional details were reported." : message.c_str());
-            ImGui::PopTextWrapPos();
-            ImGui::EndChild();
-            ImGui::PopStyleColor();
-
-            float btnW = 110.0f;
-            ImGui::SetCursorPosX(ImGui::GetWindowWidth() - btnW - 16.0f);
-            if (modernButton("Done", ImVec2(btnW, 0))) ImGui::CloseCurrentPopup();
-            ImGui::EndPopup();
-            return;
+    if (!isBackupResult) {
+        ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(FLT_MAX, viewport->WorkSize.y * 0.9f));
+        if (ui::beginDialog("##NotificationPopup", 460)) {
+            const ImVec4 accent = ui::accentColor(isError ? ui::Accent::Danger : ui::Accent::Info);
+            bool close = ui::dialogHeader(isError ? ui::Icon::Close : ui::Icon::Info, accent, title.c_str(), {}, true);
+            const float wrapWidth = ImGui::GetContentRegionAvail().x;
+            const float messageHeight = ImGui::CalcTextSize(message.c_str(), nullptr, false, wrapWidth).y;
+            const float maxMessageHeight = 320 * s;
+            if (messageHeight > maxMessageHeight) {
+                ImGui::BeginChild("##NotificationMessage", ImVec2(0, maxMessageHeight), 0);
+                ImGui::PushTextWrapPos(0);
+                ImGui::TextUnformatted(message.c_str());
+                ImGui::PopTextWrapPos();
+                ImGui::EndChild();
+            } else {
+                ImGui::PushTextWrapPos(0);
+                ImGui::TextUnformatted(message.c_str());
+                ImGui::PopTextWrapPos();
+            }
+            const float okW = 110 * s;
+            ui::dialogFooter(okW);
+            if (modernButton("OK##NotificationOk", ImVec2(okW, buttonH), ButtonTone::Primary) || close || enterPressed)
+                ImGui::CloseCurrentPopup();
+            ui::endDialog();
         }
-        ImGui::Spacing();
-        ImVec4 titleColor = isError ? ImVec4(1, 0.4f, 0.4f, 1) : ImVec4(0.3f, 1, 0.5f, 1);
-        ImGui::TextColored(titleColor, "%s", title.c_str());
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Spacing();
-        ImGui::TextWrapped("%s", message.c_str());
-        ImGui::Spacing();
-        ImGui::Spacing();
-        float btnW = 80;
-        ImGui::SetCursorPosX((ImGui::GetWindowSize().x - btnW) * 0.5f);
-        if (modernButton("OK", ImVec2(btnW, 0)))
-            ImGui::CloseCurrentPopup();
-        ImGui::Spacing();
-        ImGui::EndPopup();
+        return;
     }
+
+    // Backup Manager results: status first, details only when there is more to say.
+    const size_t firstBreak = message.find('\n');
+    std::string summary = firstBreak == std::string::npos ? message : message.substr(0, firstBreak);
+    std::string details = firstBreak == std::string::npos ? std::string() : message.substr(firstBreak + 1);
+    while (!details.empty() && (details.front() == '\n' || details.front() == '\r' || details.front() == ' '))
+        details.erase(details.begin());
+    if (summary.empty()) summary = "The operation finished.";
+    const bool hasDetails = !details.empty();
+
+    const ui::Accent accentKind = isError ? ui::Accent::Danger : cancelled ? ui::Accent::Warning : ui::Accent::Success;
+    const ImVec4 accent = ui::accentColor(accentKind);
+    const char* statusText = cancelled ? "Cancelled" : (isError ? "Completed with issues" : "Completed successfully");
+    const ui::Icon statusIcon = isError ? ui::Icon::Close : cancelled ? ui::Icon::Pause : ui::Icon::Check;
+
+    if (hasDetails) {
+        ImGui::SetNextWindowSize(ImVec2(std::min(680 * s, viewport->WorkSize.x * 0.82f),
+            std::min(500 * s, viewport->WorkSize.y * 0.78f)), ImGuiCond_Appearing);
+        ImGui::SetNextWindowSizeConstraints(ImVec2(std::min(500 * s, viewport->WorkSize.x * 0.92f), 340 * s),
+            ImVec2(viewport->WorkSize.x * 0.92f, viewport->WorkSize.y * 0.90f));
+    }
+    if (!ui::beginDialog("##NotificationPopup", 520, !hasDetails)) return;
+
+    bool close = ui::dialogHeader(statusIcon, accent, title.c_str(), summary, true);
+    ui::statusChip(statusText, accent);
+
+    if (hasDetails) {
+        ImGui::Dummy(ImVec2(0, 2 * s));
+        ui::sectionLabel("DETAILS");
+        ui::PanelStyle theme(m_resolvedLightTheme);
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, theme.background);
+        ImGui::PushStyleColor(ImGuiCol_Border, theme.border);
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 10 * s);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14 * s, 12 * s));
+        ImGui::BeginChild("##ResultDetails", ImVec2(0, -(buttonH + 16 * s)), ImGuiChildFlags_Borders);
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextUnformatted(details.c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::EndChild();
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor(2);
+    }
+
+    const float doneW = 110 * s;
+    const float copyW = 130 * s;
+    ui::dialogFooter(hasDetails ? copyW + doneW + ImGui::GetStyle().ItemSpacing.x : doneW);
+    if (hasDetails) {
+        if (modernButton("Copy Details", ImVec2(copyW, buttonH))) {
+            ImGui::SetClipboardText(message.c_str());
+            m_statusMessage = "Result details copied";
+            m_statusTime = std::chrono::steady_clock::now();
+        }
+        ImGui::SameLine();
+    }
+    if (modernButton("Done##BackupResultDone", ImVec2(doneW, buttonH), ButtonTone::Primary) || close || enterPressed)
+        ImGui::CloseCurrentPopup();
+    ui::endDialog();
 }
 
 void App::showNotification(const std::string& title, const std::string& message, bool isError) {
@@ -8869,183 +8847,169 @@ void App::renderApkInstallDialog() {
         m_showApkInstallDialog = false;
     }
 
-    ImVec2 center = viewport->GetCenter();
-    float maxW = std::max(420.0f, viewport->WorkSize.x - 32.0f);
+    const float s = ui::scale();
     float maxH = std::max(260.0f, viewport->WorkSize.y - 32.0f);
+    ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0), ImVec2(FLT_MAX, maxH));
     // Keep the dialog centered as the window resizes or the dialog content changes size.
-    if (viewportReady)
-        ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSizeConstraints(ImVec2(420, 0), ImVec2(maxW, maxH));
-    if (ImGui::BeginPopupModal("Install APK", nullptr,
-            ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoMove)) {
-        std::string apkName = m_pendingApkPath;
-        auto slash = apkName.find_last_of("\\/");
-        if (slash != std::string::npos) apkName = apkName.substr(slash + 1);
+    if (!ui::beginDialog("Install APK", 580, true, 0, viewportReady)) return;
 
-        ApkInstallDialogState installState;
-        std::string installResult;
-        std::chrono::steady_clock::time_point installStarted;
-        {
-            std::lock_guard<std::mutex> lk(m_apkInstallMutex);
-            installState = m_apkInstallState;
-            installResult = m_apkInstallResult;
-            installStarted = m_apkInstallStarted;
-        }
+    ui::PanelStyle theme(m_resolvedLightTheme);
+    const float buttonH = ui::footerButtonHeight();
+    std::string apkName = m_pendingApkPath;
+    auto slash = apkName.find_last_of("\\/");
+    if (slash != std::string::npos) apkName = apkName.substr(slash + 1);
 
-        float wrapW = std::min(560.0f, maxW - ImGui::GetStyle().WindowPadding.x * 2.0f);
+    ApkInstallDialogState installState;
+    std::string installResult;
+    std::chrono::steady_clock::time_point installStarted;
+    {
+        std::lock_guard<std::mutex> lk(m_apkInstallMutex);
+        installState = m_apkInstallState;
+        installResult = m_apkInstallResult;
+        installStarted = m_apkInstallStarted;
+    }
 
-        if (installState == ApkInstallDialogState::Installing ||
-            installState == ApkInstallDialogState::Succeeded ||
-            installState == ApkInstallDialogState::Failed) {
-            const bool succeeded = installState == ApkInstallDialogState::Succeeded;
-            const bool failed = installState == ApkInstallDialogState::Failed;
-            const ImVec4 accent = succeeded ? ImVec4(0.25f, 0.90f, 0.55f, 1.0f) :
-                failed ? ImVec4(1.0f, 0.38f, 0.38f, 1.0f) : ImVec4(0.34f, 0.73f, 1.0f, 1.0f);
-            const float elapsed = installStarted.time_since_epoch().count() == 0 ? 0.0f :
-                (float)std::chrono::duration<double>(std::chrono::steady_clock::now() - installStarted).count();
-            // adb install does not expose transfer or package-manager progress. Advance through the
-            // usual transfer phase quickly, then keep the final portion for Android verification.
-            const float estimatedProgress = std::min(0.88f, 0.20f + 0.68f * (1.0f - std::exp(-elapsed / 1.75f)));
-            const float progress = installState == ApkInstallDialogState::Installing ? estimatedProgress : 1.0f;
-
-            ImGui::TextColored(accent, "%s", succeeded ? "APK installed" : failed ? "APK installation failed" : "Installing APK");
-            ImGui::TextDisabled("%s", apkName.c_str());
-            ImGui::Spacing();
-
-            const float cardH = 152.0f;
-            ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.035f, 0.065f, 0.105f, 0.98f));
-            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(accent.x, accent.y, accent.z, 0.72f));
-            ImGui::BeginChild("##ApkInstallProgressCard", ImVec2(wrapW, cardH), ImGuiChildFlags_Borders,
-                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-            ImDrawList* drawList = ImGui::GetWindowDrawList();
-            ImVec2 cardPos = ImGui::GetWindowPos();
-            ImVec2 ringCenter(cardPos.x + 50.0f, cardPos.y + 60.0f);
-            drawList->AddCircle(ringCenter, 28.0f, IM_COL32(71, 94, 122, 255), 36, 5.0f);
-            if (installState == ApkInstallDialogState::Installing) {
-                float phase = (float)ImGui::GetTime() * 7.0f;
-                for (int i = 0; i < 12; ++i) {
-                    float angle = ((float)i / 12.0f) * 6.2831853f - 1.5707963f;
-                    float intensity = 0.20f + 0.80f * std::max(0.0f, std::cos(angle - phase));
-                    ImVec2 dot(ringCenter.x + std::cos(angle) * 28.0f, ringCenter.y + std::sin(angle) * 28.0f);
-                    drawList->AddCircleFilled(dot, 3.4f, IM_COL32(74, 174, 255, (int)(255.0f * intensity)));
-                }
-            } else {
-                drawList->AddCircleFilled(ringCenter, 23.0f, IM_COL32((int)(accent.x * 255), (int)(accent.y * 255), (int)(accent.z * 255), 255));
-                if (succeeded) {
-                    const ImU32 checkColor = IM_COL32(7, 28, 20, 255);
-                    drawList->AddLine(ImVec2(ringCenter.x - 11.0f, ringCenter.y - 1.0f),
-                        ImVec2(ringCenter.x - 3.0f, ringCenter.y + 8.0f), checkColor, 3.5f);
-                    drawList->AddLine(ImVec2(ringCenter.x - 3.0f, ringCenter.y + 8.0f),
-                        ImVec2(ringCenter.x + 12.0f, ringCenter.y - 8.0f), checkColor, 3.5f);
-                } else {
-                    const char* ringLabel = "Error";
-                    ImVec2 labelSize = ImGui::CalcTextSize(ringLabel);
-                    ImGui::SetCursorScreenPos(ImVec2(ringCenter.x - labelSize.x * 0.5f,
-                        ringCenter.y - labelSize.y * 0.5f));
-                    ImGui::TextColored(ImVec4(0.04f, 0.08f, 0.12f, 1.0f), "%s", ringLabel);
-                }
-            }
-
-            ImGui::SetCursorPos(ImVec2(96.0f, installState == ApkInstallDialogState::Installing ? 22.0f : 34.0f));
-            if (installState == ApkInstallDialogState::Installing) {
-                ImGui::TextColored(accent, "Sending and installing on Android");
-                ImGui::SetCursorPos(ImVec2(96.0f, 50.0f));
-                ImGui::TextDisabled("Keep the device connected until this finishes.");
-                ImGui::SetCursorPos(ImVec2(96.0f, 84.0f));
-                ImGui::ProgressBar(progress, ImVec2(wrapW - 112.0f, 12.0f), "");
-                ImGui::SetCursorPos(ImVec2(96.0f, 108.0f));
-                ImGui::TextDisabled("Estimated progress  %.0f%%", progress * 100.0f);
-            } else {
-                ImGui::TextColored(accent, "%s", succeeded ? "The app is ready on the selected device." : "Android could not install this APK.");
-                ImGui::SetCursorPos(ImVec2(96.0f, 60.0f));
-                ImGui::TextDisabled("%s", succeeded ? ("Device: " + installResult).c_str() : "See the Android response below.");
-            }
-            ImGui::EndChild();
-            ImGui::PopStyleColor(2);
-
-            if (failed && !installResult.empty()) {
-                ImGui::Spacing();
-                ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrapW);
-                ImGui::TextDisabled("%s", installResult.c_str());
-                ImGui::PopTextWrapPos();
-            }
-            ImGui::Spacing();
-            if (installState != ApkInstallDialogState::Installing) {
-                float btnW = 110.0f;
-                ImGui::SetCursorPosX((ImGui::GetWindowSize().x - btnW) * 0.5f);
-                if (modernButton("Close", ImVec2(btnW, 0))) ImGui::CloseCurrentPopup();
-            }
-            ImGui::EndPopup();
-            return;
-        }
-
-        ImGui::TextColored(ImVec4(0.45f, 0.70f, 1.0f, 1), "Install APK");
-        ImGui::TextDisabled("Choose where to install this app");
-        ImGui::Spacing();
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.035f, 0.065f, 0.105f, 0.98f));
-        ImGui::BeginChild("##ApkInstallFileCard", ImVec2(wrapW, 66.0f), ImGuiChildFlags_Borders,
+    auto beginCard = [&](const char* id, ImVec4 edge) {
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, theme.background);
+        ImGui::PushStyleColor(ImGuiCol_Border, edge);
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 10 * s);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(14 * s, 12 * s));
+        ImGui::BeginChild(id, ImVec2(0, 0), ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY,
             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-        ImGui::SetCursorPos(ImVec2(14.0f, 12.0f));
-        ImGui::TextColored(ImVec4(0.45f, 0.70f, 1.0f, 1), "%s", apkName.c_str());
-        ImGui::SetCursorPos(ImVec2(14.0f, 35.0f));
-        ImGui::PushTextWrapPos(wrapW - 12.0f);
-        ImGui::TextDisabled("%s", m_pendingApkPath.c_str());
-        ImGui::PopTextWrapPos();
+    };
+    auto endCard = [&]() {
         ImGui::EndChild();
-        ImGui::PopStyleColor();
-        ImGui::Spacing();
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor(2);
+    };
 
-        std::vector<DeviceInfo> online;
-        {
-            std::lock_guard<std::mutex> lk(m_deviceMutex);
-            for (const auto& d : m_devices)
-                if (d.state == "device") online.push_back(d);
-        }
+    if (installState == ApkInstallDialogState::Installing ||
+        installState == ApkInstallDialogState::Succeeded ||
+        installState == ApkInstallDialogState::Failed) {
+        const bool installing = installState == ApkInstallDialogState::Installing;
+        const bool succeeded = installState == ApkInstallDialogState::Succeeded;
+        const ImVec4 accent = ui::accentColor(succeeded ? ui::Accent::Success :
+            installing ? ui::Accent::Info : ui::Accent::Danger);
+        const float elapsed = installStarted.time_since_epoch().count() == 0 ? 0.0f :
+            (float)std::chrono::duration<double>(std::chrono::steady_clock::now() - installStarted).count();
+        // adb install does not expose transfer or package-manager progress. Advance through the
+        // usual transfer phase quickly, then keep the final portion for Android verification.
+        const float estimatedProgress = std::min(0.88f, 0.20f + 0.68f * (1.0f - std::exp(-elapsed / 1.75f)));
+        const float progress = installing ? estimatedProgress : 1.0f;
 
-        if (online.empty()) {
-            ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.45f, 1), "No Android device is connected.");
-            ImGui::TextWrapped("Connect a device with USB debugging enabled, then open this APK again.");
+        bool close = ui::dialogHeader(succeeded ? ui::Icon::Check : installing ? ui::Icon::Apps : ui::Icon::Close,
+            accent, succeeded ? "APK installed" : installing ? "Installing APK" : "APK installation failed",
+            apkName, !installing);
+
+        beginCard("##ApkInstallProgressCard", ui::withAlpha(accent, 0.45f));
+        if (installing) {
+            ImGui::PushStyleColor(ImGuiCol_Text, accent);
+            ImGui::TextUnformatted("Sending and installing on Android");
+            ImGui::PopStyleColor();
+            ImGui::PushStyleColor(ImGuiCol_Text, theme.muted);
+            ImGui::TextUnformatted("Keep the device connected until this finishes.");
+            ImGui::PopStyleColor();
+            ImGui::Dummy(ImVec2(0, 2 * s));
+            const ImVec2 trackPos = ImGui::GetCursorScreenPos();
+            const float trackW = ImGui::GetContentRegionAvail().x;
+            ui::progressTrack(trackPos, trackW, 8 * s, progress, m_theme.gradientPrimary, m_theme.gradientSecondary);
+            ImGui::Dummy(ImVec2(trackW, 8 * s));
+            ImGui::PushStyleColor(ImGuiCol_Text, theme.muted);
+            ImGui::Text("Estimated progress  %.0f%%", progress * 100.0f);
+            ImGui::PopStyleColor();
         } else {
-            if (m_pendingApkDeviceIndex < 0 || m_pendingApkDeviceIndex >= (int)online.size())
-                m_pendingApkDeviceIndex = 0;
-            if (online.size() == 1) {
-                std::string name = online[0].model.empty() ? online[0].serial : online[0].model + " (" + online[0].serial + ")";
-                ImGui::Text("Device: %s", name.c_str());
-            } else {
-                ImGui::Text("Install to:");
-                ImGui::SetNextItemWidth(460);
-                std::string preview = online[m_pendingApkDeviceIndex].model.empty()
-                    ? online[m_pendingApkDeviceIndex].serial
-                    : online[m_pendingApkDeviceIndex].model + " (" + online[m_pendingApkDeviceIndex].serial + ")";
-                if (ImGui::BeginCombo("##ApkDevice", preview.c_str())) {
-                    for (int i = 0; i < (int)online.size(); i++) {
-                        std::string label = online[i].model.empty()
-                            ? online[i].serial
-                            : online[i].model + " (" + online[i].serial + ")";
-                        bool selected = i == m_pendingApkDeviceIndex;
-                        if (ImGui::Selectable(label.c_str(), selected))
-                            m_pendingApkDeviceIndex = i;
-                        if (selected) ImGui::SetItemDefaultFocus();
-                    }
-                    ImGui::EndCombo();
-                }
-            }
-
-            ImGui::Spacing();
-            ImGui::Checkbox("Grant runtime permissions after install", &m_apkInstallGrantPermissions);
-            ImGui::Checkbox("Allow version downgrade", &m_apkInstallAllowDowngrade);
-            ImGui::Spacing();
-            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + wrapW);
-            ImGui::TextWrapped("The install command will replace an existing copy of the same app while keeping its data.");
+            ImGui::PushStyleColor(ImGuiCol_Text, accent);
+            ImGui::TextUnformatted(succeeded ? "The app is ready on the selected device." : "Android could not install this APK.");
+            ImGui::PopStyleColor();
+            ImGui::PushStyleColor(ImGuiCol_Text, theme.muted);
+            ImGui::PushTextWrapPos(0);
+            if (succeeded) ImGui::Text("Device: %s", installResult.c_str());
+            else ImGui::TextUnformatted(installResult.empty() ? "Android did not return an error message." : installResult.c_str());
             ImGui::PopTextWrapPos();
+            ImGui::PopStyleColor();
+        }
+        endCard();
+
+        if (!installing) {
+            const float closeW = 110 * s;
+            ui::dialogFooter(closeW);
+            if (modernButton("Close##ApkClose", ImVec2(closeW, buttonH), ButtonTone::Primary) || close)
+                ImGui::CloseCurrentPopup();
+        }
+        ui::endDialog();
+        return;
+    }
+
+    bool cancel = ui::dialogHeader(ui::Icon::Apps, ui::accentColor(ui::Accent::Info), "Install APK",
+        "Choose where to install this app", true);
+
+    beginCard("##ApkInstallFileCard", theme.border);
+    if (ui::semiboldFont) ImGui::PushFont(ui::semiboldFont);
+    ImGui::TextUnformatted(apkName.c_str());
+    if (ui::semiboldFont) ImGui::PopFont();
+    ImGui::PushStyleColor(ImGuiCol_Text, theme.muted);
+    ImGui::PushTextWrapPos(0);
+    ImGui::TextUnformatted(m_pendingApkPath.c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::PopStyleColor();
+    endCard();
+
+    std::vector<DeviceInfo> online;
+    {
+        std::lock_guard<std::mutex> lk(m_deviceMutex);
+        for (const auto& d : m_devices)
+            if (d.state == "device") online.push_back(d);
+    }
+
+    if (online.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ui::accentColor(ui::Accent::Danger));
+        ImGui::TextUnformatted("No Android device is connected.");
+        ImGui::PopStyleColor();
+        ImGui::PushTextWrapPos(0);
+        ImGui::TextUnformatted("Connect a device with USB debugging enabled, then open this APK again.");
+        ImGui::PopTextWrapPos();
+    } else {
+        if (m_pendingApkDeviceIndex < 0 || m_pendingApkDeviceIndex >= (int)online.size())
+            m_pendingApkDeviceIndex = 0;
+        auto deviceLabel = [](const DeviceInfo& device) {
+            return device.model.empty() ? device.serial : device.model + " (" + device.serial + ")";
+        };
+        ui::sectionLabel("INSTALL TO");
+        if (online.size() == 1) {
+            ImGui::TextUnformatted(deviceLabel(online[0]).c_str());
+        } else {
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10 * s, 8 * s));
+            std::string preview = deviceLabel(online[m_pendingApkDeviceIndex]);
+            if (ImGui::BeginCombo("##ApkDevice", preview.c_str())) {
+                for (int i = 0; i < (int)online.size(); i++) {
+                    std::string label = deviceLabel(online[i]);
+                    bool selected = i == m_pendingApkDeviceIndex;
+                    if (ImGui::Selectable(label.c_str(), selected))
+                        m_pendingApkDeviceIndex = i;
+                    if (selected) ImGui::SetItemDefaultFocus();
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::PopStyleVar();
         }
 
-        ImGui::Spacing();
-        float btnW = 110;
-        float totalW = online.empty() ? btnW : btnW * 2 + ImGui::GetStyle().ItemSpacing.x;
-        ImGui::SetCursorPosX((ImGui::GetWindowSize().x - totalW) * 0.5f);
-        ImGui::BeginDisabled(online.empty() || m_asyncBusy.load());
-        if (modernButton("Install", ImVec2(btnW, 0))) {
+        ui::sectionLabel("OPTIONS");
+        ImGui::Checkbox("Grant runtime permissions after install", &m_apkInstallGrantPermissions);
+        ImGui::Checkbox("Allow version downgrade", &m_apkInstallAllowDowngrade);
+        ImGui::PushStyleColor(ImGuiCol_Text, theme.muted);
+        ImGui::PushTextWrapPos(0);
+        ImGui::TextUnformatted("An existing copy of the same app is replaced and keeps its data.");
+        ImGui::PopTextWrapPos();
+        ImGui::PopStyleColor();
+    }
+
+    const float btnW = 110 * s;
+    const float totalW = online.empty() ? btnW : btnW * 2 + ImGui::GetStyle().ItemSpacing.x;
+    ui::dialogFooter(totalW);
+    if (!online.empty()) {
+        ImGui::BeginDisabled(m_asyncBusy.load());
+        if (modernButton("Install", ImVec2(btnW, buttonH), ButtonTone::Primary)) {
             std::string apk = m_pendingApkPath;
             DeviceInfo target = online[m_pendingApkDeviceIndex];
             bool grant = m_apkInstallGrantPermissions;
@@ -9084,12 +9048,12 @@ void App::renderApkInstallDialog() {
             });
         }
         ImGui::EndDisabled();
-        if (!online.empty()) ImGui::SameLine();
-        if (modernButton("Cancel", ImVec2(btnW, 0))) {
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndPopup();
+        ImGui::SameLine();
     }
+    if (modernButton("Cancel##ApkCancel", ImVec2(btnW, buttonH)) || cancel) {
+        ImGui::CloseCurrentPopup();
+    }
+    ui::endDialog();
 }
 
 void App::registerApkAssociation() {
@@ -9155,28 +9119,25 @@ void App::renderCloseConfirmDialog() {
         m_showCloseConfirm = false;
     }
 
-    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
-    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    if (ImGui::BeginPopupModal("Close Application?", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove)) {
-        ImGui::Text("Are you sure you want to close the application?");
-        ImGui::Spacing();
-        ImGui::Spacing();
+    if (ui::beginDialog("Close Application?", 440)) {
+        const float s = ui::scale();
+        bool cancel = ui::dialogHeader(ui::Icon::Close, ui::accentColor(ui::Accent::Warning),
+            "Close Fast Enough?", "Are you sure you want to close the application?", true);
 
-        float buttonWidth = 120.0f;
-        float spacing = ImGui::GetStyle().ItemSpacing.x;
-        float totalWidth = buttonWidth * 2 + spacing;
-        ImGui::SetCursorPosX((ImGui::GetWindowWidth() - totalWidth) * 0.5f);
-
-        if (modernButton("Yes", ImVec2(buttonWidth, 0))) {
+        const float buttonH = ui::footerButtonHeight();
+        const float closeW = 130 * s;
+        const float cancelW = 110 * s;
+        ui::dialogFooter(closeW + cancelW + ImGui::GetStyle().ItemSpacing.x);
+        if (modernButton("Close App", ImVec2(closeW, buttonH), ButtonTone::Danger)) {
             g_reallyQuit = true;
             PostMessage(g_mainHwnd, WM_CLOSE, 0, 0);
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
-        if (modernButton("No", ImVec2(buttonWidth, 0))) {
+        if (modernButton("Cancel##CloseAppCancel", ImVec2(cancelW, buttonH)) || cancel) {
             ImGui::CloseCurrentPopup();
         }
-        ImGui::EndPopup();
+        ui::endDialog();
     }
 }
 
@@ -9253,17 +9214,12 @@ void App::renderPreferencesWindow() {
         for (int pipes = 1; pipes <= 4; pipes++) {
             if (pipes > 1) ImGui::SameLine(0, 6);
             bool selected = (value == pipes);
-            if (selected) {
-                ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.45f, 0.25f, 1));
-                ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.22f, 0.55f, 0.30f, 1));
-                ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.25f, 0.65f, 0.35f, 1));
-            }
             std::string btn = "x" + std::to_string(pipes) + "##" + id + std::to_string(pipes);
-            if (modernButton(btn.c_str(), ImVec2(44.0f, 0.0f)) && value != pipes) {
+            if (modernButton(btn.c_str(), ImVec2(44.0f, 0.0f),
+                    selected ? ButtonTone::Primary : ButtonTone::Secondary) && value != pipes) {
                 value = pipes;
                 changed = true;
             }
-            if (selected) ImGui::PopStyleColor(3);
         }
         return changed;
     };
@@ -9742,14 +9698,11 @@ void App::renderThemeWindow() {
     bool scaleChanged = (scalePct != currentPct);
 
     if (scaleChanged) {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.15f, 0.35f, 0.55f, 1));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.45f, 0.70f, 1));
-        if (modernButton("Apply")) {
+        if (modernButton("Apply", ImVec2(0, 0), ButtonTone::Primary)) {
             m_pendingScale = m_scalePreview;
             m_themeNeedsReposition = true;
             changed = true;
         }
-        ImGui::PopStyleColor(2);
         ImGui::SameLine();
     }
     if (modernButton("Reset##scale")) {
@@ -10071,12 +10024,25 @@ void App::renderContextMenu(FilePanel& panel) {
 
 void App::renderNewFolderPopup() {
     if (m_showNewFolderPopup) { ImGui::OpenPopup("New Folder"); m_showNewFolderPopup = false; m_newFolderNeedsFocus = true; }
-    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f,0.5f));
-    if (ImGui::BeginPopupModal("New Folder", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::Text("Enter folder name:"); ImGui::SetNextItemWidth(300);
+    if (ui::beginDialog("New Folder", 460)) {
+        const float s = ui::scale();
+        const std::string location = m_contextPanel ? m_contextPanel->currentPath : std::string();
+        bool cancel = ui::dialogHeader(ui::Icon::Folder, ui::accentColor(ui::Accent::Info), "New folder",
+            location.empty() ? std::string("Create a folder here") : "Create in " + location, true);
+        ui::sectionLabel("FOLDER NAME");
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10 * s, 8 * s));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 7 * s);
         if (m_newFolderNeedsFocus) { ImGui::SetKeyboardFocusHere(); m_newFolderNeedsFocus = false; }
-        bool enter = ImGui::InputText("##NFN", m_newFolderName, sizeof(m_newFolderName), ImGuiInputTextFlags_EnterReturnsTrue);
-        if ((modernButton("Create", ImVec2(120,0)) || enter) && strlen(m_newFolderName) > 0 && m_contextPanel) {
+        bool enter = ImGui::InputTextWithHint("##NFN", "New folder", m_newFolderName, sizeof(m_newFolderName), ImGuiInputTextFlags_EnterReturnsTrue);
+        ImGui::PopStyleVar(2);
+        const float buttonH = ui::footerButtonHeight();
+        const float buttonW = 110 * s;
+        ui::dialogFooter(buttonW * 2 + ImGui::GetStyle().ItemSpacing.x);
+        ImGui::BeginDisabled(strlen(m_newFolderName) == 0);
+        bool createPressed = modernButton("Create", ImVec2(buttonW, buttonH), ButtonTone::Primary);
+        ImGui::EndDisabled();
+        if ((createPressed || enter) && strlen(m_newFolderName) > 0 && m_contextPanel) {
             if (m_contextPanel->isAndroid) {
                 std::string mkdirPath = m_contextPanel->currentPath + "/" + m_newFolderName;
                 if (m_selectedDevice >= 0) { int slot = m_contextPanel->deviceSlot; FilePanel* target=m_contextPanel; postAsync("Creating folder: "+mkdirPath, [this, mkdirPath, slot, target]() {
@@ -10101,16 +10067,23 @@ void App::renderNewFolderPopup() {
             m_contextPanel->needsRefresh = true; ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
-        if (modernButton("Cancel", ImVec2(120,0))) ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
+        if (modernButton("Cancel##NewFolderCancel", ImVec2(buttonW, buttonH)) || cancel) ImGui::CloseCurrentPopup();
+        ui::endDialog();
     }
 }
 
 void App::renderRenamePopup() {
     if (m_showRenamePopup) { ImGui::OpenPopup("Rename"); m_showRenamePopup = false; m_renameNeedsSelect = true; }
-    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f,0.5f));
-    if (ImGui::BeginPopupModal("Rename", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::Text("New name:"); ImGui::SetNextItemWidth(300);
+    if (ui::beginDialog("Rename", 460)) {
+        const float s = ui::scale();
+        const std::string currentName = m_contextPanel && m_contextPanel->validIndex(m_contextIndex)
+            ? m_contextPanel->entryName(m_contextIndex) : std::string();
+        bool cancel = ui::dialogHeader(ui::Icon::File, ui::accentColor(ui::Accent::Info), "Rename",
+            currentName.empty() ? std::string() : "Current name: " + currentName, true);
+        ui::sectionLabel("NEW NAME");
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10 * s, 8 * s));
+        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 7 * s);
         if (m_renameNeedsSelect) ImGui::SetKeyboardFocusHere();
         auto renameCb = [](ImGuiInputTextCallbackData* data) -> int {
             bool* needsSelect = (bool*)data->UserData;
@@ -10127,7 +10100,11 @@ void App::renderRenamePopup() {
         bool enter = ImGui::InputText("##RN", m_renameBuf, sizeof(m_renameBuf),
             ImGuiInputTextFlags_EnterReturnsTrue | ImGuiInputTextFlags_CallbackAlways,
             renameCb, &m_renameNeedsSelect);
-        if ((modernButton("Rename", ImVec2(120,0)) || enter) && m_contextPanel && m_contextPanel->validIndex(m_contextIndex)) {
+        ImGui::PopStyleVar(2);
+        const float buttonH = ui::footerButtonHeight();
+        const float buttonW = 110 * s;
+        ui::dialogFooter(buttonW * 2 + ImGui::GetStyle().ItemSpacing.x);
+        if ((modernButton("Rename##RenameConfirm", ImVec2(buttonW, buttonH), ButtonTone::Primary) || enter) && m_contextPanel && m_contextPanel->validIndex(m_contextIndex)) {
             std::string oldN = m_contextPanel->entryName(m_contextIndex), requestedN(m_renameBuf);
             std::string newN = makeUniquePanelName(*m_contextPanel, requestedN, m_contextIndex);
             if (!newN.empty() && newN != oldN) {
@@ -10169,61 +10146,72 @@ void App::renderRenamePopup() {
             m_contextIndex = -1; m_contextPanel = nullptr; ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
-        if (modernButton("Cancel", ImVec2(120,0))) ImGui::CloseCurrentPopup();
-        ImGui::EndPopup();
+        if (modernButton("Cancel##RenameCancel", ImVec2(buttonW, buttonH)) || cancel) ImGui::CloseCurrentPopup();
+        ui::endDialog();
     }
 }
 
 void App::renderDeleteConfirmPopup() {
     if (m_showDeleteConfirm) { ImGui::OpenPopup("Confirm Delete"); m_showDeleteConfirm = false; }
-    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    if (ImGui::BeginPopupModal("Confirm Delete", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    if (ui::beginDialog("Confirm Delete", 500)) {
+        const float s = ui::scale();
+        const float buttonH = ui::footerButtonHeight();
+        ui::PanelStyle theme(m_resolvedLightTheme);
         if (m_contextPanel && !m_contextPanel->selectedIndices.empty()) {
             int selCount = (int)m_contextPanel->selectedIndices.size();
             bool isAndroid = m_contextPanel->isAndroid;
-
-            // Warning header
-            if (m_deletePermanent || isAndroid) {
-                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 0.3f, 0.3f, 1));
-                ImGui::Text("PERMANENTLY DELETE - This cannot be undone!");
-                ImGui::PopStyleColor();
-            } else {
-                ImGui::TextColored(ImVec4(0.5f, 0.7f, 1, 1), "Move to Recycle Bin:");
-            }
-            ImGui::Spacing();
+            const bool permanent = m_deletePermanent || isAndroid;
+            const std::string itemWord = selCount == 1 ? "1 item" : std::to_string(selCount) + " items";
+            bool cancel = ui::dialogHeader(ui::Icon::Trash,
+                ui::accentColor(permanent ? ui::Accent::Danger : ui::Accent::Warning),
+                permanent ? "Delete permanently?" : "Move to Recycle Bin?",
+                permanent ? itemWord + " will be deleted. This cannot be undone."
+                          : itemWord + " will be moved to the Recycle Bin.", true);
 
             // Show file names (up to 10, then summarize)
+            ImGui::PushStyleColor(ImGuiCol_ChildBg, theme.background);
+            ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 10 * s);
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12 * s, 10 * s));
+            ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(8 * s, 6 * s));
+            const float rowH = ImGui::GetTextLineHeightWithSpacing();
+            const int listedRows = std::min(selCount, 10) + (selCount > 10 ? 1 : 0);
+            ImGui::BeginChild("##DeleteList", ImVec2(0, listedRows * rowH + 20 * s), ImGuiChildFlags_Borders);
             int shown = 0;
             for (int idx : m_contextPanel->selectedIndices) {
                 if (!m_contextPanel->validIndex(idx)) continue;
                 if (shown < 10) {
                     std::string n = m_contextPanel->entryName(idx);
-                    ImGui::TextColored(ImVec4(1, 0.7f, 0.3f, 1), "  %s", n.c_str());
+                    const ImVec2 iconPos = ImGui::GetCursorScreenPos();
+                    ui::icon(m_contextPanel->entryIsDir(idx) ? ui::Icon::Folder : ui::Icon::File,
+                        ImVec2(iconPos.x, iconPos.y + 1 * s), ImGui::GetTextLineHeight() - 2 * s, theme.color(theme.muted));
+                    ImGui::Dummy(ImVec2(ImGui::GetTextLineHeight(), ImGui::GetTextLineHeight()));
+                    ImGui::SameLine();
+                    ui::textClipped(n, ImGui::GetContentRegionAvail().x, theme.color(theme.text));
                 }
                 shown++;
             }
             if (selCount > 10) {
-                ImGui::TextDisabled("  ... and %d more", selCount - 10);
+                ImGui::PushStyleColor(ImGuiCol_Text, theme.muted);
+                ImGui::Text("and %d more", selCount - 10);
+                ImGui::PopStyleColor();
             }
-
-            ImGui::Spacing();
-            if (selCount > 1) {
-                ImGui::TextColored(ImVec4(1, 0.5f, 0.5f, 1), "%d items will be %s",
-                    selCount, (m_deletePermanent || isAndroid) ? "permanently deleted" : "moved to Recycle Bin");
-                ImGui::Spacing();
-            }
+            ImGui::EndChild();
+            ImGui::PopStyleVar(3);
+            ImGui::PopStyleColor();
 
             // Hint about Shift
             if (!isAndroid && !m_deletePermanent) {
-                ImGui::TextDisabled("Tip: Hold Shift for permanent delete");
-                ImGui::Spacing();
+                ImGui::PushStyleColor(ImGuiCol_Text, theme.muted);
+                ImGui::TextUnformatted("Tip: hold Shift while deleting to skip the Recycle Bin.");
+                ImGui::PopStyleColor();
             }
 
             // Delete button
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.6f, 0.15f, 0.15f, 1));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.8f, 0.2f, 0.2f, 1));
-            const char* btnLabel = (m_deletePermanent || isAndroid) ? "Delete Permanently" : "Move to Recycle Bin";
-            if (modernButton(btnLabel, ImVec2(180, 0))) {
+            const char* btnLabel = permanent ? "Delete Permanently" : "Move to Recycle Bin";
+            const float deleteW = 180 * s;
+            const float cancelW = 110 * s;
+            ui::dialogFooter(deleteW + cancelW + ImGui::GetStyle().ItemSpacing.x);
+            if (modernButton(btnLabel, ImVec2(deleteW, buttonH), ButtonTone::Danger)) {
                 if (isAndroid) {
                     // Android: always permanent via server, refresh after the queued work finishes.
                     std::vector<std::string> delPaths;
@@ -10279,20 +10267,22 @@ void App::renderDeleteConfirmPopup() {
                 m_contextIndex = -1; m_contextPanel = nullptr;
                 ImGui::CloseCurrentPopup();
             }
-            ImGui::PopStyleColor(2);
             ImGui::SameLine();
-            if (modernButton("Cancel", ImVec2(120, 0))) {
+            if (modernButton("Cancel##DeleteCancel", ImVec2(cancelW, buttonH)) || cancel) {
                 m_contextIndex = -1; m_contextPanel = nullptr;
                 ImGui::CloseCurrentPopup();
             }
         } else {
-            ImGui::Text("No items selected.");
-            if (modernButton("Close", ImVec2(120, 0))) {
+            bool cancel = ui::dialogHeader(ui::Icon::Trash, ui::accentColor(ui::Accent::Info),
+                "Nothing to delete", "No items are selected.", true);
+            const float closeW = 110 * s;
+            ui::dialogFooter(closeW);
+            if (modernButton("Close##DeleteClose", ImVec2(closeW, buttonH), ButtonTone::Primary) || cancel) {
                 m_contextIndex = -1; m_contextPanel = nullptr;
                 ImGui::CloseCurrentPopup();
             }
         }
-        ImGui::EndPopup();
+        ui::endDialog();
     }
 }
 
@@ -10721,13 +10711,21 @@ void App::devicePollLoop() {
         return false;
     };
 
+    // ADB devices from the last update, merged with companion app devices on every update.
+    std::vector<DeviceInfo> lastAdbDevices;
+    uint64_t companionGeneration = 0;
+
     // Helper to process a device list update (from track-devices or getDevices)
-    auto processDeviceUpdate = [&](const std::vector<DeviceInfo>& devices) {
+    auto processDeviceUpdate = [&](const std::vector<DeviceInfo>& adbDevices) {
         std::lock_guard<std::mutex> deviceUpdate(m_deviceWorkMutex);
         if (m_shutdownPoll) return;
         m_pollBusy = true;
+        lastAdbDevices = adbDevices;
+        companionGeneration = companion::generation();
+        discoverDeviceIdentities(adbDevices);
+        linkCompanionDevices(adbDevices);
+        std::vector<DeviceInfo> devices = applyConnectionModes(adbDevices);
         std::string curSerial;
-        discoverDeviceIdentities(devices);
         bool primaryServerRunning = m_device.isServerRunning();
         bool primaryListedOnline = false;
         {
@@ -11160,11 +11158,14 @@ void App::devicePollLoop() {
                     m_statusTime = std::chrono::steady_clock::now();
                     continue;
                 }
-                m_statusMessage = "ADB not found. Extract the full ZIP or install Android SDK Platform Tools.";
+                if (companion::devices().empty())
+                    m_statusMessage = "ADB not found. Extract the full ZIP or install Android SDK Platform Tools.";
                 m_statusTime = std::chrono::steady_clock::now();
             }
-            for (int i = 0; i < 50 && !m_shutdownPoll; i++)
+            for (int i = 0; i < 50 && !m_shutdownPoll; i++) {
+                if (companion::generation() != companionGeneration) processDeviceUpdate(lastAdbDevices);
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
             continue;
         }
 
@@ -11177,8 +11178,10 @@ void App::devicePollLoop() {
 
             // Set a timeout on the tracking socket so we can periodically check for shutdown
             // and run health checks
-            DWORD trackTimeout = 10000; // 10s — wake up periodically for health checks
+            // Wake up every second for companion device changes, and every 10s for health checks.
+            DWORD trackTimeout = 1000;
             setsockopt((SOCKET)trackSock, SOL_SOCKET, SO_RCVTIMEO, (const char*)&trackTimeout, sizeof(trackTimeout));
+            auto lastHealthCheck = std::chrono::steady_clock::now();
 
             AdbDeviceSnapshot snapshot;
             while (!m_shutdownPoll) {
@@ -11190,6 +11193,12 @@ void App::devicePollLoop() {
                     continue;
                 }
                 if (err == WSAETIMEDOUT) {
+                    if (companion::generation() != companionGeneration) {
+                        processDeviceUpdate(lastAdbDevices);
+                        continue;
+                    }
+                    if (std::chrono::steady_clock::now() - lastHealthCheck < std::chrono::seconds(10)) continue;
+                    lastHealthCheck = std::chrono::steady_clock::now();
                     // An idle stream still needs periodic connection health checks.
                     // A busy worker owns the connections until its operation is complete.
                     std::unique_lock<std::mutex> healthCheck(m_deviceWorkMutex, std::try_to_lock);
@@ -11307,8 +11316,10 @@ void App::devicePollLoop() {
             LOG_WARN("Poll", "track-devices unavailable — falling back to polling");
 
             for (int cycle = 0; cycle < 3 && !m_shutdownPoll; cycle++) {
-                for (int i = 0; i < 30 && !m_shutdownPoll; i++)
+                for (int i = 0; i < 30 && !m_shutdownPoll; i++) {
+                    if (companion::generation() != companionGeneration) processDeviceUpdate(lastAdbDevices);
                     std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                }
                 if (m_shutdownPoll) return;
 
                 auto devices = m_device.getDevices();
@@ -11386,6 +11397,18 @@ void App::onDeviceChanged() {
     readyMessage.deviceSessionReady = true;
     readyMessage.readyDeviceSlot = 0;
     postUiMessage(std::move(readyMessage));
+
+    if (companion::isSerial(serial)) {
+        m_dualChannelAvailable = false;
+        m_secondaryChannelType.clear();
+        m_extraChannels.clear();
+        m_activeChannelCount = 1;
+        std::string link = m_device.isDirectConnection() ? "WiFi" : "USB";
+        m_statusMessage = "Ready | Companion app over " + link + (m_device.useRoot() ? " (root)" : "") +
+            " | Storage: " + m_androidStorageRoot;
+        m_statusTime = std::chrono::steady_clock::now();
+        return;
+    }
 
     // Reset the previous channel state before WiFi auto-connect begins. The
     // asynchronous connection must not be cleared after it succeeds.
@@ -12198,7 +12221,38 @@ void App::processBatchQueue() {
         std::string batchUsbSerial;
         std::string batchHwSerial;
 
-        if (batch->useParallelChannels && !batch->isLocalCopy && !batch->isCrossDevice && !useMultiNic) {
+        if (batch->useParallelChannels && !batch->isLocalCopy && !batch->isCrossDevice && !useMultiNic &&
+            companion::isSerial(batchDev.connectedSerial())) {
+            auto transferPipes = m_prefs.pipePreferencesFor(batchDev.connectedSerial());
+            RuntimeChannel primary;
+            primary.dev = &batchDev;
+            primary.name = companionPrimaryName(batchDev);
+            primary.reconnectIp = batchDev.connectedHost();
+            primary.preferUsb = !batchDev.isDirectConnection();
+            runtimeChannels.push_back(std::move(primary));
+            for (const auto& endpoint : companionChannelTargets(batchDev, transferPipes.usbPipeCount,
+                    transferPipes.wifiPipeCount, TransferBatch::MAX_CHANNELS)) {
+                if (batch->stopRequested) break;
+                auto ch = std::make_unique<DeviceClient>();
+                ch->setSerial(batchDev.connectedSerial());
+                ch->setServerPort(endpoint.port);
+                ch->setLocalPort(endpoint.port);
+                if (!ch->connectTcp(endpoint.host, endpoint.port) || !ch->verifyConnection()) continue;
+                RuntimeChannel rc;
+                rc.dev = ch.get();
+                rc.owned = std::move(ch);
+                rc.cancellation = batch->cancellation.track(*rc.dev);
+                rc.name = companionChannelName(endpoint.kind);
+                rc.reconnectIp = endpoint.host;
+                rc.preferUsb = endpoint.isUsb();
+                runtimeChannels.push_back(std::move(rc));
+            }
+            if (runtimeChannels.size() > 1) {
+                batch->numChannels = (int)runtimeChannels.size();
+                LOG_INFO("Transfer", "Prepared " + std::to_string(runtimeChannels.size()) +
+                    " companion channels for slot " + std::to_string(batchDeviceSlot));
+            }
+        } else if (batch->useParallelChannels && !batch->isLocalCopy && !batch->isCrossDevice && !useMultiNic) {
             std::string batchSerial = batchDev.connectedSerial();
             bool primaryUsesWifi = batchDev.isDirectConnection() || isWifiSerial(batchSerial);
             bool primaryIsUsb = !batchSerial.empty() && !primaryUsesWifi;
@@ -12666,7 +12720,7 @@ void App::processBatchQueue() {
                             if (tab != std::string::npos) { serial = dline.substr(0, tab); break; }
                         }
                 }
-                if (!serial.empty()) {
+                if (!serial.empty() && !companion::isSerial(serial)) {
                     std::string hwOut = m_device.runAdbCommand("-s " + serial + " shell getprop ro.serialno");
                     // Trim whitespace
                     while (lastCharOr(hwOut) == '\n' || lastCharOr(hwOut) == '\r' || lastCharOr(hwOut) == ' ')
@@ -12715,7 +12769,7 @@ void App::processBatchQueue() {
                             lastUpgradeCheck = now;
                             // Only upgrade if we're NOT on our original physical link
                             // AND both channels are on the same link (otherwise already dual-channel)
-                            if (currentIsUsb != origIsUsb) {
+                            if (currentIsUsb != origIsUsb && !companion::isSerial(origSerial)) {
                                 bool upgraded = false;
                                 if (origIsUsb) {
                                     // Originally USB, now on WiFi. Try to get back to USB.
@@ -13072,7 +13126,15 @@ void App::processBatchQueue() {
 
                             bool connected = false;
                             std::string actualTransport = ch.channelName; // default to current name
-                            if (!bindLocalIp.empty()) {
+                            if (companion::isSerial(serial)) {
+                                for (const auto& endpoint : companion::endpointsFor(companion::idFromSerial(serial))) {
+                                    if (dev.connectTcp(endpoint.host, endpoint.port) && dev.verifyConnection()) {
+                                        connected = true;
+                                        actualTransport = companionChannelName(endpoint.kind);
+                                        break;
+                                    }
+                                }
+                            } else if (!bindLocalIp.empty()) {
                                 // Multi-NIC channel: reconnect with same NIC binding
                                 connected = dev.connectTcp(reconnectIp, dev.serverPort(), bindLocalIp) && dev.verifyConnection();
                             } else {
@@ -13429,6 +13491,34 @@ void App::processBatchQueue() {
                                             std::vector<RuntimeChannel>& out) {
             out.clear();
             if (!baseDev.isServerRunning()) return;
+
+            if (companion::isSerial(baseDev.connectedSerial())) {
+                auto pipes = m_prefs.pipePreferencesFor(baseDev.connectedSerial());
+                RuntimeChannel primary;
+                primary.dev = &baseDev;
+                primary.name = companionPrimaryName(baseDev);
+                primary.reconnectIp = baseDev.connectedHost();
+                primary.preferUsb = !baseDev.isDirectConnection();
+                out.push_back(std::move(primary));
+                for (const auto& endpoint : companionChannelTargets(baseDev, pipes.usbPipeCount, pipes.wifiPipeCount,
+                        TransferBatch::MAX_CHANNELS)) {
+                    if (batch->stopRequested) break;
+                    auto ch = std::make_unique<DeviceClient>();
+                    ch->setSerial(baseDev.connectedSerial());
+                    ch->setServerPort(endpoint.port);
+                    ch->setLocalPort(endpoint.port);
+                    if (!ch->connectTcp(endpoint.host, endpoint.port) || !ch->verifyConnection()) continue;
+                    RuntimeChannel rc;
+                    rc.dev = ch.get();
+                    rc.owned = std::move(ch);
+                    rc.cancellation = batch->cancellation.track(*rc.dev);
+                    rc.name = companionChannelName(endpoint.kind);
+                    rc.reconnectIp = endpoint.host;
+                    rc.preferUsb = endpoint.isUsb();
+                    out.push_back(std::move(rc));
+                }
+                return;
+            }
 
             std::string serial = baseDev.connectedSerial();
             std::string wifiIp;
@@ -14998,6 +15088,10 @@ void App::processBatchQueue() {
 }
 
 std::string App::queryDeviceDisplayName(const std::string& serial) {
+    if (companion::isSerial(serial)) {
+        CompanionDeviceView view;
+        return companion::find(companion::idFromSerial(serial), view) ? view.name : std::string();
+    }
     DeviceClient query;
     query.setAdbPath(m_device.getAdbPath());
     auto result = query.runAdbCommandResult("-s " + serial +
