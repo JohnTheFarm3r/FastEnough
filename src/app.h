@@ -633,6 +633,7 @@ private:
     void renderCopyMoveDialog();
     void renderCrossDeviceDialog();
     void openAndroidFile(FilePanel& panel, int index);
+    void renderOpenFileCard();
     void requestMcrawMount(FilePanel& panel, const std::string& path);
 
     void refreshWindowsPanel(FilePanel& panel);
@@ -964,6 +965,27 @@ private:
     std::atomic<uint64_t> m_pairingGeneration{0};
     std::atomic<bool> m_pairingWorkerBusy{false};
     std::thread m_pairingThread;
+
+    // Download state for a phone file opened with a double-click.
+    struct OpenFileTask {
+        std::atomic<bool> active{false};
+        std::atomic<bool> cancelRequested{false};
+        std::atomic<bool> cancellable{false};
+        std::atomic<uint64_t> bytes{0};
+        std::atomic<uint64_t> total{0};
+        std::atomic<double> bytesPerSecond{0.0};
+        std::atomic<double> etaSeconds{-1.0};
+        std::atomic<int> outcome{0};
+        std::mutex mutex;
+        std::string name;
+        std::string detail;
+        std::chrono::steady_clock::time_point started{};
+        std::chrono::steady_clock::time_point finished{};
+    };
+    enum OpenFileOutcome { OpenFileRunning = 0, OpenFileOpened = 1, OpenFileFailed = 2, OpenFileCancelled = 3 };
+    OpenFileTask m_openFile;
+    std::thread m_openFileThread;
+    bool m_openFileDismissed = false;
     std::string m_pairingService;
     std::string m_pairingPassword;
     std::string m_pairingAddress;

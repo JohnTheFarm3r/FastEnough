@@ -1,6 +1,7 @@
 #include "app.h"
 #include "companion.h"
 #include "ui_widgets.h"
+#include "ui_panels.h"
 #include "ui_transfer.h"
 #include "device_dokan.h"
 #include "mcraw_projfs.h"
@@ -110,22 +111,53 @@ void App::renderWorkspaceHeader() {
     const float s = ui::scale();
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(16*s,8*s));
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0);
-    ImGui::PushStyleColor(ImGuiCol_ChildBg,ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg,ImVec4(0,0,0,0));
     ImGui::BeginChild("##WorkspaceHeader", ImVec2(0,ui::controlHeight()+16*s), ImGuiChildFlags_None, ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_AlwaysUseWindowPadding);
-    ui::button("F##Brand", ui::Icon::None, ui::Appearance::Selected, ImVec2(28*s,32*s));
-    if (ImGui::GetWindowWidth() > 760*ui::textScale()) {
-        ImGui::SameLine(0,10*s); ImGui::AlignTextToFramePadding(); ImGui::TextUnformatted("Fast Enough");
+    ImDrawList* headerDraw=ImGui::GetWindowDrawList();
+    {
+        const ImVec2 headerPos=ImGui::GetWindowPos();
+        const float headerWidth=ImGui::GetWindowWidth(), headerHeight=ImGui::GetWindowHeight();
+        ImVec4 divider=ImGui::GetStyleColorVec4(ImGuiCol_Border);divider.w=0.7f;
+        headerDraw->AddLine(ImVec2(headerPos.x,headerPos.y+headerHeight-1),ImVec2(headerPos.x+headerWidth,headerPos.y+headerHeight-1),ImGui::GetColorU32(divider));
     }
-    ImGui::SameLine(0,24*s);
+    {
+        const ImVec2 brand=ImGui::GetCursorScreenPos();
+        const float size=32*s;
+        ImVec4 glow=m_theme.gradientPrimary;glow.w=0.30f;
+        headerDraw->AddRectFilled(ImVec2(brand.x+2*s,brand.y+4*s),ImVec2(brand.x+size-2*s,brand.y+size+4*s),ImGui::GetColorU32(glow),9*s);
+        ui::gradientRect(headerDraw,brand,ImVec2(brand.x+size,brand.y+size),m_theme.gradientPrimary,m_theme.gradientSecondary,9*s);
+        ImFont* brandFont=ui::semiboldFont?ui::semiboldFont:ImGui::GetFont();
+        const float brandSize=ImGui::GetFontSize()*1.05f;
+        const ImVec2 letter=brandFont->CalcTextSizeA(brandSize,FLT_MAX,0,"F");
+        const ImVec4 mid=ImVec4((m_theme.gradientPrimary.x+m_theme.gradientSecondary.x)*0.5f,(m_theme.gradientPrimary.y+m_theme.gradientSecondary.y)*0.5f,
+            (m_theme.gradientPrimary.z+m_theme.gradientSecondary.z)*0.5f,1);
+        headerDraw->AddText(brandFont,brandSize,ImVec2(brand.x+(size-letter.x)*0.5f,brand.y+(size-letter.y)*0.5f),
+            ui::brightness(mid)>0.55f?IM_COL32(10,15,24,255):IM_COL32(255,255,255,255),"F");
+        ImGui::Dummy(ImVec2(size,size));
+    }
+    if (ImGui::GetWindowWidth() > 760*ui::textScale()) {
+        ImGui::SameLine(0,12*s);
+        if(ui::semiboldFont)ImGui::PushFont(ui::semiboldFont);
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY()+(32*s-ImGui::GetTextLineHeight())*0.5f);
+        ImGui::TextUnformatted("Fast Enough");
+        if(ui::semiboldFont)ImGui::PopFont();
+    }
+    ImGui::SameLine(0,28*s);
+    ImGui::SetCursorPosY(ImGui::GetStyle().WindowPadding.y);
     auto tab = [&](const char* name, bool selected) {
         if (selected) ImGui::PushStyleColor(ImGuiCol_TextDisabled, ImGui::GetStyleColorVec4(ImGuiCol_Text));
         if(ui::semiboldFont)ImGui::PushFont(ui::semiboldFont);
-        bool pressed = ui::button(name,ui::Icon::None,ui::Appearance::Quiet);
+        bool pressed = ui::button(name,ui::Icon::None,ui::Appearance::Quiet,ImVec2(ImGui::CalcTextSize(name).x+30*s,0));
         if(ui::semiboldFont)ImGui::PopFont();
         if (selected) ImGui::PopStyleColor();
         if (selected) {
             ImVec2 a=ImGui::GetItemRectMin(), b=ImGui::GetItemRectMax();
-            ImGui::GetWindowDrawList()->AddLine(ImVec2(a.x+8*s,b.y+6*s),ImVec2(b.x-8*s,b.y+6*s),ImGui::GetColorU32(ImGuiCol_CheckMark),2*s);
+            const float y=ImGui::GetWindowPos().y+ImGui::GetWindowHeight()-3*s;
+            ImVec4 glow=m_theme.gradientPrimary;glow.w=0.22f;
+            headerDraw->AddRectFilled(ImVec2(a.x+6*s,y-3*s),ImVec2(b.x-6*s,y+3*s),ImGui::GetColorU32(glow),4*s);
+            headerDraw->AddRectFilledMultiColor(ImVec2(a.x+10*s,y-1.5f*s),ImVec2(b.x-10*s,y+1.5f*s),
+                ImGui::GetColorU32(m_theme.gradientPrimary),ImGui::GetColorU32(m_theme.gradientSecondary),
+                ImGui::GetColorU32(m_theme.gradientSecondary),ImGui::GetColorU32(m_theme.gradientPrimary));
         }
         return pressed;
     };
@@ -164,9 +196,31 @@ void App::renderWorkspaceHeader() {
     std::string deviceLabel=std::to_string(ready)+(ready==1?" phone ready":" phones ready");
     if (ImGui::GetContentRegionAvail().x < ImGui::CalcTextSize(deviceLabel.c_str()).x+156*s)
         deviceLabel=std::to_string(ready);
-    float rightWidth=ImGui::CalcTextSize(deviceLabel.c_str()).x+132*s;
+    float rightWidth=ImGui::CalcTextSize(deviceLabel.c_str()).x+150*s;
     ImGui::SameLine(std::max(ImGui::GetItemRectMax().x-ImGui::GetWindowPos().x+12*s,ImGui::GetWindowWidth()-rightWidth));
-    if (ui::button((deviceLabel+"##Devices").c_str(),ui::Icon::Phone)) ImGui::OpenPopup("##WorkspaceDevices");
+    {
+        ui::PanelStyle theme(m_resolvedLightTheme);
+        const ImVec4 ink=ready>0?theme.green:theme.muted;
+        const ImVec2 textSize=ImGui::CalcTextSize(deviceLabel.c_str());
+        const ImVec2 pillSize(textSize.x+40*s,32*s);
+        const ImVec2 pillPos=ImGui::GetCursorScreenPos();
+        if(ImGui::InvisibleButton("##Devices",pillSize)) ImGui::OpenPopup("##WorkspaceDevices");
+        const bool hovered=ImGui::IsItemHovered();
+        if(hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+        ImVec4 fill=ink;fill.w=hovered?0.18f:0.11f;
+        ImVec4 edge=ink;edge.w=hovered?0.55f:0.35f;
+        headerDraw->AddRectFilled(pillPos,ImVec2(pillPos.x+pillSize.x,pillPos.y+pillSize.y),ImGui::GetColorU32(fill),pillSize.y*0.5f);
+        headerDraw->AddRect(pillPos,ImVec2(pillPos.x+pillSize.x,pillPos.y+pillSize.y),ImGui::GetColorU32(edge),pillSize.y*0.5f);
+        const ImVec2 dotCenter(pillPos.x+17*s,pillPos.y+pillSize.y*0.5f);
+        if(ready>0) { ImVec4 halo=ink;halo.w=0.30f; headerDraw->AddCircleFilled(dotCenter,6*s,ImGui::GetColorU32(halo)); }
+        headerDraw->AddCircleFilled(dotCenter,3.5f*s,ImGui::GetColorU32(ink));
+        if(ui::semiboldFont)ImGui::PushFont(ui::semiboldFont);
+        headerDraw->AddText(ImVec2(pillPos.x+28*s,pillPos.y+(pillSize.y-ImGui::GetTextLineHeight())*0.5f),ImGui::GetColorU32(ink),deviceLabel.c_str());
+        if(ui::semiboldFont)ImGui::PopFont();
+        ui::tooltip("Connected phones");
+    }
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10*ui::scale(), 10*ui::scale()));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10*ui::scale(), 9*ui::scale()));
     if (ImGui::BeginPopup("##WorkspaceDevices")) {
         for (int slot=0;slot < deviceSessionCount();++slot) {
             if (deviceSession(slot).serial.empty()) continue;
@@ -181,6 +235,7 @@ void App::renderWorkspaceHeader() {
         if (ImGui::MenuItem("Pair over WiFi...")) openWifiPairing();
         ImGui::EndPopup();
     }
+    ImGui::PopStyleVar(2);
     ImGui::SameLine(0,2*s);
     if (ui::button("##WorkspaceSettings",ui::Icon::Settings,ui::Appearance::Quiet,ImVec2(32*s,32*s),"Workspace settings")) m_workspaceDrawer=3;
     ImGui::SameLine(0,2*s);
@@ -202,12 +257,38 @@ void App::renderWorkspaceToolbar() {
     bool canMove=canTransfer&&!source.isAndroid&&!destination.isAndroid;
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(16*s,6*s));
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding,0);
-    ImGui::PushStyleColor(ImGuiCol_ChildBg,ImGui::GetStyleColorVec4(ImGuiCol_WindowBg));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg,ImVec4(0,0,0,0));
     ImGui::BeginChild("##WorkspaceToolbar",ImVec2(0,ui::controlHeight()+12*s),ImGuiChildFlags_None,ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_AlwaysUseWindowPadding);
-    ImGui::AlignTextToFramePadding();
-    std::string selection=hasSelection?std::to_string(source.selectedIndices.size())+" selected, "+formatSize(source.selectedFileSize()):"Select files to copy";
     bool wide=ImGui::GetWindowWidth()>980*ui::textScale();
-    ui::textClipped(selection,(wide?150.0f:110.0f)*s,ImGui::GetColorU32(ImGuiCol_TextDisabled),ui::controlHeight());
+    {
+        // Selection chip: count badge plus total size, or a hint when nothing is selected.
+        const float chipWidth=(wide?200.0f:150.0f)*s;
+        const float chipHeight=ui::controlHeight();
+        const ImVec2 chip=ImGui::GetCursorScreenPos();
+        ImDrawList* draw=ImGui::GetWindowDrawList();
+        const float centerY=chip.y+chipHeight*0.5f;
+        if(hasSelection) {
+            const std::string count=std::to_string(source.selectedIndices.size());
+            const std::string detail="selected, "+formatSize(source.selectedFileSize());
+            ImFont* bold=ui::semiboldFont?ui::semiboldFont:ImGui::GetFont();
+            const float badgeText=bold->CalcTextSizeA(ImGui::GetFontSize()*0.85f,FLT_MAX,0,count.c_str()).x;
+            const float badgeWidth=std::max(22*s,badgeText+12*s);
+            const float detailWidth=std::min(ImGui::CalcTextSize(detail.c_str()).x,chipWidth-badgeWidth-30*s);
+            const float width=badgeWidth+detailWidth+30*s;
+            draw->AddRectFilled(chip,ImVec2(chip.x+width,chip.y+chipHeight),ImGui::GetColorU32(ImGuiCol_Button),chipHeight*0.5f);
+            draw->AddRect(chip,ImVec2(chip.x+width,chip.y+chipHeight),ImGui::GetColorU32(ImGuiCol_Border),chipHeight*0.5f);
+            const ImVec2 badgeMin(chip.x+7*s,centerY-11*s);
+            draw->AddRectFilled(badgeMin,ImVec2(badgeMin.x+badgeWidth,centerY+11*s),ImGui::GetColorU32(ImGuiCol_CheckMark),11*s);
+            const ImVec4 accent=ImGui::GetStyleColorVec4(ImGuiCol_CheckMark);
+            const float badgeSize=ImGui::GetFontSize()*0.85f;
+            draw->AddText(bold,badgeSize,ImVec2(badgeMin.x+(badgeWidth-badgeText)*0.5f,centerY-badgeSize*0.5f),
+                ui::brightness(accent)>0.55f?IM_COL32(10,15,24,255):IM_COL32(255,255,255,255),count.c_str());
+            ui::drawTextClipped(ImVec2(badgeMin.x+badgeWidth+9*s,centerY-ImGui::GetTextLineHeight()*0.5f),detail,detailWidth+2*s,ImGui::GetColorU32(ImGuiCol_Text));
+        } else {
+            ui::drawTextClipped(ImVec2(chip.x+4*s,centerY-ImGui::GetTextLineHeight()*0.5f),"Select files to copy",chipWidth-8*s,ImGui::GetColorU32(ImGuiCol_TextDisabled));
+        }
+        ImGui::Dummy(ImVec2(chipWidth,chipHeight));
+    }
     ImGui::SameLine(0,10*s);
     ImGui::BeginDisabled(!canTransfer);
     std::string name=panelDisplayName(destination);
@@ -231,6 +312,8 @@ void App::renderWorkspaceToolbar() {
     }
     ImGui::SameLine(0,4*s);
     if(ui::button("##FileActions",ui::Icon::More,ui::Appearance::Quiet,ImVec2(32*s,32*s),"More file actions")) ImGui::OpenPopup("##FileActionsMenu");
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10*ui::scale(), 10*ui::scale()));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10*ui::scale(), 9*ui::scale()));
     if(ImGui::BeginPopup("##FileActionsMenu")) {
         if(ImGui::MenuItem("Move to other pane",nullptr,false,canMove)) startWorkspaceTransfer(true);
         if(ImGui::MenuItem("Rename...","F2",false,hasSelection&&source.selectedIndices.size()==1&&panelAvailable(source))) {
@@ -246,6 +329,7 @@ void App::renderWorkspaceToolbar() {
         if(ImGui::MenuItem("Show hidden files",nullptr,source.showHidden)) { source.showHidden=!source.showHidden;source.needsRefresh=true; }
         ImGui::EndPopup();
     }
+    ImGui::PopStyleVar(2);
     float trailingWidth=ImGui::CalcTextSize("Compare").x+97*s;
     ImGui::SameLine(std::max(ImGui::GetCursorPosX(),ImGui::GetWindowWidth()-trailingWidth));
     ImGui::BeginDisabled(!fileView||destination.isApps||destination.isConnections);
@@ -286,18 +370,26 @@ void App::renderPaneHeader(FilePanel& panel, PanelSide side) {
     float locationWidth = std::max(40*s, width - 40*s - rootWidth);
     if(ui::button("##PaneLocation",ui::Icon::None,ui::Appearance::Quiet,ImVec2(locationWidth,headerHeight),"Choose a location"))
         ImGui::OpenPopup("##PaneLocationMenu");
-    auto* draw=ImGui::GetWindowDrawList();
-    draw->AddRectFilled(ImVec2(origin.x,origin.y+5*s),ImVec2(origin.x+32*s,origin.y+39*s),ImGui::GetColorU32(ImGuiCol_Button),6*s);
-    ui::icon(panel.isAndroid||panel.isApps||panel.isConnections?ui::Icon::Phone:ui::Icon::Computer,
-        ImVec2(origin.x+6*s,origin.y+11*s),20*s,ImGui::GetColorU32(ImGuiCol_TextDisabled));
+    ui::PanelStyle paneTheme(m_resolvedLightTheme);
+    const bool phonePane=panel.isAndroid||panel.isApps||panel.isConnections;
+    const float tileSize=36*s/paneTheme.s;
+    paneTheme.tile(phonePane?ui::Icon::Phone:ui::Icon::Computer,ImVec2(origin.x,origin.y+(headerHeight-36*s)*0.5f),tileSize,
+        phonePane?ImGui::GetStyleColorVec4(ImGuiCol_CheckMark):paneTheme.blue);
     float textWidth=std::max(1.0f,locationWidth-62*s);
     if(ui::semiboldFont)ImGui::PushFont(ui::semiboldFont);
     ui::drawTextClipped(ImVec2(origin.x+44*s,origin.y+4*s),title,textWidth,ImGui::GetColorU32(ImGuiCol_Text));
     float arrowX=origin.x+44*s+std::min(textWidth,ImGui::CalcTextSize(title.c_str()).x)+6*s;
     if(ui::semiboldFont)ImGui::PopFont();
     ui::icon(ui::Icon::Down,ImVec2(arrowX,origin.y+4*s),14*s,ImGui::GetColorU32(ImGuiCol_TextDisabled));
-    ui::drawTextClipped(ImVec2(origin.x+44*s,origin.y+ImGui::GetFontSize()+11*s),caption,
-        std::max(1.0f,locationWidth-48*s),ImGui::GetColorU32(ImGuiCol_TextDisabled),12*ui::textScale());
+    {
+        const bool online=!phonePane||panelAvailable(panel);
+        const float captionSize=12*ui::textScale();
+        const float captionY=origin.y+ImGui::GetFontSize()+11*s;
+        ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(origin.x+47*s,captionY+captionSize*0.55f),3*s,
+            ImGui::GetColorU32(online?(phonePane?paneTheme.green:paneTheme.muted):paneTheme.gold));
+        ui::drawTextClipped(ImVec2(origin.x+55*s,captionY),caption,
+            std::max(1.0f,locationWidth-60*s),ImGui::GetColorU32(ImGuiCol_TextDisabled),captionSize);
+    }
     if (showRoot) {
         ImGui::SameLine(0,8*s);
         ImGui::SetCursorScreenPos(ImVec2(origin.x + locationWidth + 8*s, origin.y + (headerHeight-ui::controlHeight())*0.5f));
@@ -310,6 +402,8 @@ void App::renderPaneHeader(FilePanel& panel, PanelSide side) {
         else{m_lastFocusedPanel=&panel;m_workspaceDrawer=1;}
     }
     ImGui::SetNextWindowSizeConstraints(ImVec2(280*s,0),ImVec2(460*s,500*s));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10*ui::scale(), 10*ui::scale()));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10*ui::scale(), 9*ui::scale()));
     if(ImGui::BeginPopup("##PaneLocationMenu")) {
         if(!panel.isApps&&ImGui::Selectable("This PC",!panel.isAndroid&&!panel.isConnections)) switchPanelMode(panel,false);
         for(int slot=0;slot < deviceSessionCount();++slot) {
@@ -332,6 +426,7 @@ void App::renderPaneHeader(FilePanel& panel, PanelSide side) {
         }
         ImGui::EndPopup();
     }
+    ImGui::PopStyleVar(2);
     ImGui::Separator();
     ImGui::PopID();
 }
@@ -389,13 +484,29 @@ void App::renderPaneNavigation(FilePanel& panel) {
             }
             ImGui::SameLine(0,2*s);
         }
+        {
+            const ImVec2 barMin=ImGui::GetCursorScreenPos();
+            const ImVec2 barMax(ImGui::GetWindowPos().x+ImGui::GetWindowWidth()-36*s,barMin.y+28*s);
+            if(barMax.x>barMin.x+20*s) {
+                ImGui::GetWindowDrawList()->AddRectFilled(barMin,barMax,ImGui::GetColorU32(ImGuiCol_FrameBg),8*s);
+                ImGui::GetWindowDrawList()->AddRect(barMin,barMax,ImGui::GetColorU32(ImGuiCol_Border),8*s);
+            }
+            ImGui::SetCursorScreenPos(ImVec2(barMin.x+3*s,barMin.y+2*s));
+        }
         size_t first=condensed&&!crumbs.empty()?crumbs.size()-1:0;
         for(size_t i=first;i<crumbs.size();++i){
-            if(i>first){ImGui::SameLine(0,0);ImGui::AlignTextToFramePadding();ImGui::TextDisabled(">");ImGui::SameLine(0,0);}
+            if(i>first){
+                ImGui::SameLine(0,0);
+                const ImVec2 chevron=ImGui::GetCursorScreenPos();
+                ui::icon(ui::Icon::Forward,ImVec2(chevron.x+1*s,chevron.y+(24*s-12*s)*0.5f+1.5f*s),12*s,ImGui::GetColorU32(ImGuiCol_TextDisabled));
+                ImGui::Dummy(ImVec2(14*s,24*s));
+                ImGui::SameLine(0,0);
+            }
             ImGui::PushID((int)i);
-            float remaining=std::max(24*s,ImGui::GetContentRegionAvail().x-36*s);
-            float width=std::min(remaining,ImGui::CalcTextSize(crumbs[i].first.c_str()).x+20*s);
-            if(ui::button(crumbs[i].first.c_str(),ui::Icon::None,ui::Appearance::Quiet,ImVec2(width,28*s),crumbs[i].second.c_str()))navigateToDirectory(panel,crumbs[i].second);
+            float remaining=std::max(24*s,ImGui::GetContentRegionAvail().x-40*s);
+            float width=std::min(remaining,ImGui::CalcTextSize(crumbs[i].first.c_str()).x+18*s);
+            const bool last=i+1==crumbs.size();
+            if(ui::button(crumbs[i].first.c_str(),ui::Icon::None,last?ui::Appearance::Secondary:ui::Appearance::Quiet,ImVec2(width,24*s),crumbs[i].second.c_str()))navigateToDirectory(panel,crumbs[i].second);
             ImGui::PopID();
         }
         ImGui::SameLine(std::max(ImGui::GetCursorPosX(),ImGui::GetWindowWidth()-32*s));
@@ -597,27 +708,70 @@ void App::renderWorkspaceDrawer() {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(20*s,18*s));
     ImGui::PushStyleColor(ImGuiCol_WindowBg,ImGui::GetStyleColorVec4(ImGuiCol_PopupBg));
     if(ImGui::Begin("##WorkspaceDrawer",&open,ImGuiWindowFlags_NoResize|ImGuiWindowFlags_NoMove|ImGuiWindowFlags_NoCollapse|ImGuiWindowFlags_NoTitleBar)) {
-        ImGui::AlignTextToFramePadding();ImGui::TextUnformatted(title);
-        ImGui::SameLine(ImGui::GetWindowWidth()-54*s);
-        if(ui::button("##CloseDrawer",ui::Icon::Close,ui::Appearance::Quiet,ImVec2(30*s,30*s),"Close details"))m_workspaceDrawer=0;
+        {
+            ui::PanelStyle theme(m_resolvedLightTheme);
+            const ImVec2 head=ImGui::GetCursorScreenPos();
+            const ui::Icon headIcon=m_workspaceDrawer==1?ui::Icon::File:m_workspaceDrawer==2?ui::Icon::Phone:ui::Icon::Settings;
+            theme.tile(headIcon,head,38*s/theme.s,ImGui::GetStyleColorVec4(ImGuiCol_CheckMark));
+            theme.label(ImVec2(head.x+52*s,head.y+(38*s-17*theme.s)*0.5f),title,ImGui::GetContentRegionAvail().x-100*s,theme.text,17,true);
+            ImGui::SetCursorScreenPos(ImVec2(head.x+ImGui::GetContentRegionAvail().x-32*s,head.y+4*s));
+            if(ui::button("##CloseDrawer",ui::Icon::Close,ui::Appearance::Quiet,ImVec2(30*s,30*s),"Close details"))m_workspaceDrawer=0;
+            ImGui::SetCursorScreenPos(ImVec2(head.x,head.y+50*s));
+        }
         ImGui::Separator();ImGui::Spacing();
         if(m_workspaceDrawer==3) {
             const char* modes[]={"Follow Windows","Dark","Light"};
-            ImGui::TextUnformatted("Appearance");ImGui::SetNextItemWidth(-1);
-            if(ImGui::Combo("##WorkspaceTheme",&m_theme.mode,modes,3)){m_theme.customColors=false;m_pendingScale=m_theme.userScale;m_theme.save();}
-            ImGui::Spacing();ImGui::TextUnformatted("File rows");
-            int density=m_prefs.compactRows?1:0;const char* densities[]={"Comfortable","Compact"};ImGui::SetNextItemWidth(-1);
-            if(ImGui::Combo("##WorkspaceDensity",&density,densities,2)){m_prefs.compactRows=density==1;m_prefs.save();}
-            ImGui::Spacing();ImGui::Separator();ImGui::Spacing();
-            if(ui::button("Customize appearance",ui::Icon::Settings,ui::Appearance::Secondary))m_showThemeWindow=true;
-            if(ui::button("Preferences",ui::Icon::Settings,ui::Appearance::Secondary))m_showPreferences=true;
-            if(ui::button("Activity log",ui::Icon::File,ui::Appearance::Secondary)){m_showDebugWindow=true;m_workspaceDrawer=0;}
-            ImGui::Spacing();ImGui::TextDisabled("Keyboard shortcuts");
-            ImGui::TextUnformatted("Ctrl+A    Select all\nF2           Rename\nF5           Refresh folders\nDelete    Delete selection\nCtrl+L    Edit folder path\nEscape  Close details or clear selection");
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,ImVec2(12*s,8*s));
+            const float half=(ImGui::GetContentRegionAvail().x-12*s)*0.5f;
+            const ImVec2 settingsTop=ImGui::GetCursorScreenPos();
+            ui::sectionLabel("APPEARANCE");ImGui::SetNextItemWidth(half);
+            if(ui::combo("##WorkspaceTheme",&m_theme.mode,modes,3)){m_theme.customColors=false;m_pendingScale=m_theme.userScale;m_theme.save();}
+            const float settingsBottom=ImGui::GetCursorScreenPos().y;
+            ImGui::SetCursorScreenPos(ImVec2(settingsTop.x+half+12*s,settingsTop.y));
+            ui::sectionLabel("FILE ROWS");
+            ImGui::SetCursorScreenPos(ImVec2(settingsTop.x+half+12*s,ImGui::GetCursorScreenPos().y));
+            int density=m_prefs.compactRows?1:0;const char* densities[]={"Comfortable","Compact"};ImGui::SetNextItemWidth(half);
+            if(ui::combo("##WorkspaceDensity",&density,densities,2)){m_prefs.compactRows=density==1;m_prefs.save();}
+            ImGui::SetCursorScreenPos(ImVec2(settingsTop.x,std::max(settingsBottom,ImGui::GetCursorScreenPos().y)));
+            ImGui::PopStyleVar();
+            ImGui::Spacing();ImGui::Spacing();
+            auto drawerAction=[&](const char* id,const char* label,ui::Icon glyph) {
+                const ImVec2 p=ImGui::GetCursorScreenPos();
+                const ImVec2 size(ImGui::GetContentRegionAvail().x,44*s);
+                const bool pressed=ui::button(id,ui::Icon::None,ui::Appearance::Secondary,size);
+                ImDrawList* draw=ImGui::GetWindowDrawList();
+                ui::icon(glyph,ImVec2(p.x+14*s,p.y+(size.y-18*s)*0.5f),18*s,ImGui::GetColorU32(ImGuiCol_TextDisabled));
+                if(ui::semiboldFont)ImGui::PushFont(ui::semiboldFont);
+                draw->AddText(ImVec2(p.x+44*s,p.y+(size.y-ImGui::GetTextLineHeight())*0.5f),ImGui::GetColorU32(ImGuiCol_Text),label);
+                if(ui::semiboldFont)ImGui::PopFont();
+                ui::icon(ui::Icon::Forward,ImVec2(p.x+size.x-28*s,p.y+(size.y-14*s)*0.5f),14*s,ImGui::GetColorU32(ImGuiCol_TextDisabled));
+                return pressed;
+            };
+            if(drawerAction("##DrawerAppearance","Customize appearance",ui::Icon::Wand))m_showThemeWindow=true;
+            if(drawerAction("##DrawerPreferences","Preferences",ui::Icon::Settings))m_showPreferences=true;
+            if(drawerAction("##DrawerLog","Activity log",ui::Icon::File)){m_showDebugWindow=true;m_workspaceDrawer=0;}
+            ImGui::Spacing();ImGui::Spacing();
+            ui::sectionLabel("KEYBOARD SHORTCUTS");
+            struct Shortcut{const char* key;const char* label;};
+            const Shortcut shortcuts[]={{"Ctrl+A","Select all"},{"F2","Rename"},{"F5","Refresh folders"},{"Delete","Delete selection"},
+                {"Ctrl+L","Edit folder path"},{"Esc","Close details or clear selection"}};
+            for(const auto& shortcut:shortcuts) {
+                const ImVec2 p=ImGui::GetCursorScreenPos();
+                const float rowHeight=ImGui::GetTextLineHeight()+12*s;
+                const ImVec2 keySize=ImGui::CalcTextSize(shortcut.key);
+                ImDrawList* draw=ImGui::GetWindowDrawList();
+                const ImVec2 capMin(p.x,p.y+(rowHeight-keySize.y)*0.5f-3*s), capMax(p.x+keySize.x+14*s,capMin.y+keySize.y+6*s);
+                draw->AddRectFilled(ImVec2(capMin.x,capMin.y+2*s),ImVec2(capMax.x,capMax.y+2*s),ImGui::GetColorU32(ImGuiCol_Border),5*s);
+                draw->AddRectFilled(capMin,capMax,ImGui::GetColorU32(ImGuiCol_Button),5*s);
+                draw->AddRect(capMin,capMax,ImGui::GetColorU32(ImGuiCol_Border),5*s);
+                draw->AddText(ImVec2(capMin.x+7*s,capMin.y+3*s),ImGui::GetColorU32(ImGuiCol_Text),shortcut.key);
+                draw->AddText(ImVec2(p.x+86*s,p.y+(rowHeight-ImGui::GetTextLineHeight())*0.5f),ImGui::GetColorU32(ImGuiCol_Text),shortcut.label);
+                ImGui::Dummy(ImVec2(ImGui::GetContentRegionAvail().x,rowHeight));
+            }
         } else if(m_workspaceDrawer==2) {
             int slot=m_detailsDeviceSlot;
             ImGui::SetNextItemWidth(-1);
-            if(ImGui::BeginCombo("##DetailsDevice",deviceDisplayName(slot).c_str())) {
+            if(ui::beginCombo("##DetailsDevice",deviceDisplayName(slot).c_str())) {
                 for(int i=0;i < deviceSessionCount();++i)if(!deviceSession(i).serial.empty()) {
                     if(ImGui::Selectable((deviceDisplayName(i)+"##"+std::to_string(i)).c_str(),i==slot))m_detailsDeviceSlot=i;
                 }

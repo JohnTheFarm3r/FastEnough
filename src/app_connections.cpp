@@ -123,7 +123,7 @@ void App::renderWifiWizard() {
             if (m_wizardSucceeded) m_wifiBannerDismissed = true;
             ImGui::CloseCurrentPopup();
         };
-        theme.tile(ui::Icon::Wifi, origin, 46);
+        theme.tile(ui::Icon::Wifi, origin, 46, theme.green);
         theme.label(ImVec2(origin.x + 64 * s, origin.y - s), "WiFi Setup Wizard", width - 104 * s, theme.text, 24, true);
         theme.label(ImVec2(origin.x + 64 * s, origin.y + 30 * s), "Connect your phone wirelessly", width - 104 * s, theme.muted, 13);
         if (theme.button("##CloseWifiWizard", "", ui::Icon::Close,
@@ -137,12 +137,32 @@ void App::renderWifiWizard() {
             bool complete = step > i && (i < 2 || m_wizardSucceeded);
             bool active = std::min(step, 2) == i;
             ImVec2 p(origin.x + i * (stepWidth + 8 * s), origin.y + 70 * s);
-            theme.box(p, ImVec2(stepWidth, 40 * s), active ? theme.raised : theme.background,
-                theme.background, active ? theme.blue : theme.border, 7);
-            auto ink = complete ? theme.green : active ? theme.blue : theme.muted;
-            if (complete) ui::icon(ui::Icon::Check, ImVec2(p.x + 10 * s, p.y + 12 * s), 16 * s, theme.color(ink));
-            else theme.label(ImVec2(p.x + 13 * s, p.y + 11 * s), std::to_string(i + 1), 18 * s, ink, 13, true);
-            theme.label(ImVec2(p.x + 36 * s, p.y + 11 * s), steps[i], stepWidth - 42 * s, active ? theme.text : theme.muted, 13, active);
+            const ImVec4 accent = ImGui::GetStyleColorVec4(ImGuiCol_CheckMark);
+            ImVec4 activeFill = accent; activeFill.w = 0.12f;
+            ImVec4 activeEdge = accent; activeEdge.w = 0.65f;
+            theme.box(p, ImVec2(stepWidth, 42 * s), active ? activeFill : theme.background,
+                active ? activeFill : theme.background, active ? activeEdge : theme.border, 9);
+            auto* stepDraw = ImGui::GetWindowDrawList();
+            ImFont* stepFont = ui::semiboldFont ? ui::semiboldFont : ImGui::GetFont();
+            const float labelWidth = stepFont->CalcTextSizeA(13 * s, FLT_MAX, 0, steps[i]).x;
+            const float dot = 22 * s;
+            const float groupWidth = dot + 10 * s + labelWidth;
+            const float startX = p.x + std::max(8 * s, (stepWidth - groupWidth) * 0.5f);
+            const ImVec2 dotCenter(startX + dot * 0.5f, p.y + 21 * s);
+            ImVec4 dotFill = complete ? theme.green : active ? accent : theme.raised;
+            if (complete) dotFill.w = 0.20f;
+            stepDraw->AddCircleFilled(dotCenter, dot * 0.5f, theme.color(dotFill));
+            if (complete) {
+                ui::icon(ui::Icon::Check, ImVec2(dotCenter.x - 7 * s, dotCenter.y - 7 * s), 14 * s, theme.color(theme.green));
+            } else {
+                const std::string number = std::to_string(i + 1);
+                const ImVec2 numberSize = stepFont->CalcTextSizeA(12 * s, FLT_MAX, 0, number.c_str());
+                stepDraw->AddText(stepFont, 12 * s, ImVec2(dotCenter.x - numberSize.x * 0.5f, dotCenter.y - numberSize.y * 0.5f),
+                    active ? (ui::brightness(accent) > 0.55f ? IM_COL32(10, 15, 24, 255) : IM_COL32(255, 255, 255, 255)) : theme.color(theme.muted),
+                    number.c_str());
+            }
+            theme.label(ImVec2(startX + dot + 10 * s, p.y + (42 * s - 13 * s) * 0.5f - 1 * s), steps[i],
+                stepWidth - (startX - p.x) - dot - 14 * s, active ? theme.text : theme.muted, 13, active);
         }
 
         std::vector<DeviceInfo> snapshot;
@@ -206,21 +226,19 @@ void App::renderWifiWizard() {
                 ui::tooltip((displayName(serial) + "\n" + serial).c_str());
                 if (selected) theme.box(p, ImVec2(bodyWidth, 66 * s), theme.raised, theme.background, theme.blue, 7);
             } else theme.box(p, ImVec2(bodyWidth, 66 * s), theme.raised, theme.background, theme.border, 7);
-            theme.tile(ui::Icon::Phone, ImVec2(p.x + 12 * s, p.y + 13 * s), 40);
+            theme.tile(ui::Icon::Phone, ImVec2(p.x + 12 * s, p.y + 13 * s), 40, ImGui::GetStyleColorVec4(ImGuiCol_CheckMark));
             theme.label(ImVec2(p.x + 66 * s, p.y + 13 * s), displayName(serial), bodyWidth - 172 * s, theme.text, 15, true);
             theme.label(ImVec2(p.x + 66 * s, p.y + 39 * s), serial, bodyWidth - 172 * s, theme.muted, 13);
             bool wifi = isWirelessAdbSerial(serial);
             auto ink = wifi ? theme.green : theme.blue;
-            ImVec2 badge(p.x + bodyWidth - 106 * s, p.y + 20 * s);
-            ImVec4 fill = ink;
-            fill.w = .12f;
-            ImGui::GetWindowDrawList()->AddRectFilled(badge, ImVec2(badge.x + 66 * s, badge.y + 26 * s), theme.color(fill), 6 * s);
-            ui::icon(wifi ? ui::Icon::Wifi : ui::Icon::Usb, ImVec2(badge.x + 8 * s, badge.y + 6 * s), 14 * s, theme.color(ink));
-            theme.label(ImVec2(badge.x + 29 * s, badge.y + 5 * s), wifi ? "WiFi" : "USB", 32 * s, ink, 12, true);
+            const ImVec2 badgeSize = theme.pillSize(wifi ? "WiFi" : "USB");
+            ImVec2 badge(p.x + bodyWidth - (interactive ? 44 * s : 16 * s) - badgeSize.x, p.y + (66 * s - badgeSize.y) * 0.5f);
+            theme.pill(badge, badgeSize, wifi ? ui::Icon::Wifi : ui::Icon::Usb, wifi ? "WiFi" : "USB", ink);
             if (interactive) {
                 ImVec2 center(p.x + bodyWidth - 22 * s, p.y + 33 * s);
-                ImGui::GetWindowDrawList()->AddCircle(center, 8 * s, theme.color(selected ? theme.blue : theme.border), 20, s);
-                if (selected) ImGui::GetWindowDrawList()->AddCircleFilled(center, 4 * s, theme.color(theme.blue));
+                const ImVec4 accent = ImGui::GetStyleColorVec4(ImGuiCol_CheckMark);
+                ImGui::GetWindowDrawList()->AddCircle(center, 9 * s, theme.color(selected ? accent : theme.border), 24, 1.5f * s);
+                if (selected) ImGui::GetWindowDrawList()->AddCircleFilled(center, 5 * s, theme.color(accent));
             }
             ImGui::SetCursorScreenPos(p);
             ImGui::Dummy(ImVec2(bodyWidth, 66 * s));
@@ -291,8 +309,9 @@ void App::renderWifiWizard() {
         ImVec2 footer(origin.x, ImGui::GetWindowPos().y + ImGui::GetWindowHeight() - 64 * s);
         ImGui::GetWindowDrawList()->AddLine(ImVec2(footer.x, footer.y - 16 * s), ImVec2(footer.x + width, footer.y - 16 * s), theme.color(theme.border), s);
         bool back = step == 1 || (step == 3 && !m_wizardSucceeded);
-        if (theme.button("##WizardBack", back ? "Back" : step == 0 ? "Cancel" : "Close", back ? ui::Icon::Back : ui::Icon::None,
-            footer, ImVec2(100 * s, 40 * s), theme.muted)) {
+        ImGui::SetCursorScreenPos(footer);
+        if (ui::button(back ? "Back##WizardBack" : step == 0 ? "Cancel##WizardBack" : "Close##WizardBack",
+                back ? ui::Icon::Back : ui::Icon::None, ui::Appearance::Secondary, ImVec2(110 * s, 40 * s))) {
             if (back) { ++m_wizardProbeGeneration; m_wizardProbeBusy = false; m_wizardStep = 0; }
             else close();
         }
@@ -300,8 +319,10 @@ void App::renderWifiWizard() {
             step == 2 ? "Setting up..." : m_wizardSucceeded ? "Done" : "Try again";
         bool disabled = (step == 0 && !selectionAvailable) || (step == 1 && m_wizardProbeBusy) || step == 2;
         ImGui::BeginDisabled(disabled);
-        if (theme.button("##WizardNext", action, step == 0 ? ui::Icon::Forward : step == 3 && m_wizardSucceeded ? ui::Icon::Check : ui::Icon::Wifi,
-            ImVec2(footer.x + width - 148 * s, footer.y), ImVec2(148 * s, 40 * s), rgb(255, 255, 255), 1)) {
+        ImGui::SetCursorScreenPos(ImVec2(footer.x + width - 160 * s, footer.y));
+        if (ui::button((std::string(action) + "##WizardNext").c_str(),
+                step == 0 ? ui::Icon::Forward : step == 3 && m_wizardSucceeded ? ui::Icon::Check : ui::Icon::Wifi,
+                ui::Appearance::Primary, ImVec2(160 * s, 40 * s))) {
             if (step == 0 || (step == 3 && !m_wizardSucceeded)) { m_wizardStep = 1; requestWizardWifiProbe(); }
             else if (step == 1) { if (m_wizardWifiIp.empty()) requestWizardWifiProbe(); else startWizardWifiSetup(); }
             else if (step == 3) close();
@@ -321,7 +342,6 @@ void App::renderConnectionManager(FilePanel& panel) {
     ImGui::PushStyleColor(ImGuiCol_TextDisabled, theme.muted);
     ImGui::PushStyleColor(ImGuiCol_FrameBg, theme.raised);
     ImGui::PushStyleColor(ImGuiCol_Border, theme.border);
-    ImGui::PushStyleColor(ImGuiCol_CheckMark, theme.blue);
     ImGui::PushStyleColor(ImGuiCol_PopupBg, theme.surface);
     ImGui::PushStyleColor(ImGuiCol_HeaderHovered, theme.raised);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(18 * s, 18 * s));
@@ -335,7 +355,7 @@ void App::renderConnectionManager(FilePanel& panel) {
     const float padding = 18 * s;
     const float innerWidth = std::max(1.0f, width - 2 * padding);
     float y = origin.y;
-    theme.tile(ui::Icon::Link, origin, 56);
+    theme.tile(ui::Icon::Link, origin, 56, ImGui::GetStyleColorVec4(ImGuiCol_CheckMark));
     theme.label(ImVec2(origin.x + 78 * s, y - 1 * s), "Connections", width - 172 * s, theme.text, 29, true);
     theme.label(ImVec2(origin.x + 78 * s, y + 36 * s), "USB and wireless connections", width - 80 * s, theme.muted, 16);
     if (theme.button("##ConnectionHelp", "Help", ui::Icon::Help,
@@ -454,9 +474,9 @@ void App::renderConnectionManager(FilePanel& panel) {
     }
     int rows = std::max(1, ((int)visibleDevices.size() + columns - 1) / columns);
     float availableHeight = availableHeader + rows * 78 * s + (rows - 1) * 12 * s + padding;
-    theme.box(ImVec2(origin.x, y), ImVec2(width, availableHeight), theme.surface, theme.background, theme.border, 10);
+    theme.card(ImVec2(origin.x, y), ImVec2(width, availableHeight), theme.blue);
     theme.heading(ImVec2(origin.x + padding, y + padding), wideHeader ? 440 * s : innerWidth,
-        ui::Icon::Phone, "Available devices", "Devices detected on your network or via USB");
+        ui::Icon::Phone, "Available devices", "Devices detected on your network or via USB", theme.blue);
 
     float controlsY = y + (wideHeader ? 20 : 72) * s;
     float controlsX = wideHeader ? origin.x + width - padding - 566 * s : origin.x + padding;
@@ -469,7 +489,7 @@ void App::renderConnectionManager(FilePanel& panel) {
     ImGui::SetCursorScreenPos(ImVec2(filterX, filterY));
     ImGui::SetNextItemWidth(112 * s);
     const char* filters[] = { "All devices", "USB devices", "WiFi devices" };
-    if (ImGui::BeginCombo("##ConnectionTransport", filters[m_connectionFilter], ImGuiComboFlags_NoArrowButton)) {
+    if (ui::beginCombo("##ConnectionTransport", filters[m_connectionFilter], ImGuiComboFlags_NoArrowButton)) {
         for (int i = 0; i < 3; ++i)
             if (ImGui::Selectable(filters[i], m_connectionFilter == i)) m_connectionFilter = i;
         ImGui::EndCombo();
@@ -512,27 +532,33 @@ void App::renderConnectionManager(FilePanel& panel) {
             device.state == "device" ? "Preparing file access in the background..." :
             device.state == "unpaired" ? "Click to pair. Approve this computer on the phone." : device.state;
         ui::tooltip((device.model + "\n" + device.serial + "\n" + readiness).c_str());
-        ui::icon(ui::Icon::Phone, ImVec2(p.x + 18 * s, p.y + 21 * s), 34 * s, theme.color(theme.text));
-        theme.label(ImVec2(p.x + 70 * s, p.y + 17 * s), device.model.empty() ? device.serial : device.model,
-            cardWidth - 185 * s, theme.text, 14, true);
-        theme.label(ImVec2(p.x + cardWidth - 105 * s, p.y + 17 * s),
-            ready ? "Ready" : device.state == "device" ? "Preparing..." : device.state == "unpaired" ? "Not paired" : "", 90 * s,
-            ready ? theme.green : theme.gold, 12);
         bool wifi = isWifiDevice(device);
+        theme.tile(ui::Icon::Phone, ImVec2(p.x + 16 * s, p.y + (78 * s - 42 * s) * 0.5f), 42 * s / theme.s, wifi ? theme.green : theme.blue);
         const bool app = companion::isSerial(device.serial);
         const char* badge = app ? (wifi ? "WiFi App" : "USB App") : wifi ? "WiFi" : "USB";
         ImVec4 badgeColor = wifi ? theme.green : theme.blue;
         if (device.state == "unpaired") { badge = "Pair"; badgeColor = theme.gold; }
         else if (device.state != "device") { badge = device.state == "unauthorized" ? "Allow USB" : "Offline"; badgeColor = theme.gold; }
-        float badgeWidth = device.state == "unauthorized" || (app && device.state == "device") ? 84 * s : 65 * s;
-        ImVec2 badgePos(p.x + cardWidth - badgeWidth - 14 * s, p.y + 42 * s);
-        ImVec4 badgeFill = badgeColor;
-        badgeFill.w = .13f;
-        ImGui::GetWindowDrawList()->AddRectFilled(badgePos, ImVec2(badgePos.x + badgeWidth, badgePos.y + 25 * s), theme.color(badgeFill), 6 * s);
-        ui::icon(wifi ? ui::Icon::Wifi : ui::Icon::Usb, ImVec2(badgePos.x + 8 * s, badgePos.y + 5 * s), 15 * s, theme.color(badgeColor));
-        theme.label(ImVec2(badgePos.x + 28 * s, badgePos.y + 5 * s), badge, badgeWidth - 30 * s, badgeColor, 12, true);
-        theme.label(ImVec2(p.x + 70 * s, p.y + 43 * s), app ? "Companion app" : device.serial,
-            badgePos.x - p.x - 78 * s, theme.muted, 12);
+        // Status line and transport badge share one right-aligned column, centered on each other.
+        const char* statusLabel = ready ? "Ready" : device.state == "device" ? "Preparing..." : device.state == "unpaired" ? "Not paired" : "";
+        const ImVec2 badgeSize = theme.pillSize(badge);
+        const float statusWidth = ImGui::CalcTextSize(statusLabel).x + (*statusLabel ? 13 * s : 0);
+        const float columnWidth = std::max(badgeSize.x, statusWidth);
+        const float columnX = p.x + cardWidth - 16 * s - columnWidth;
+        const float groupHeight = ImGui::GetTextLineHeight() + 6 * s + badgeSize.y;
+        const float groupY = p.y + (78 * s - groupHeight) * 0.5f;
+        if (*statusLabel) {
+            const ImVec4 statusInk = ready ? theme.green : theme.gold;
+            const float statusX = columnX + (columnWidth - statusWidth) * 0.5f;
+            ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(statusX + 3 * s, groupY + ImGui::GetTextLineHeight() * 0.5f), 3 * s, theme.color(statusInk));
+            ImGui::GetWindowDrawList()->AddText(ImVec2(statusX + 13 * s, groupY), theme.color(statusInk), statusLabel);
+        }
+        ImVec2 badgePos(columnX + (columnWidth - badgeSize.x) * 0.5f, groupY + ImGui::GetTextLineHeight() + 6 * s);
+        theme.pill(badgePos, badgeSize, wifi ? ui::Icon::Wifi : ui::Icon::Usb, badge, badgeColor);
+        const float nameX = p.x + 72 * s;
+        const float nameWidth = columnX - nameX - 10 * s;
+        theme.label(ImVec2(nameX, p.y + 20 * s), device.model.empty() ? device.serial : device.model, nameWidth, theme.text, 14, true);
+        theme.label(ImVec2(nameX, p.y + 44 * s), app ? "Companion app" : device.serial, nameWidth, theme.muted, 12);
         if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
         if (pressed) openDevice(device);
         ImGui::PopID();
@@ -561,9 +587,9 @@ void App::renderConnectionManager(FilePanel& panel) {
     });
     float savedHeight = savedHeader + std::max(1, (int)savedIndices.size()) * rowHeight +
         std::max(0, (int)savedIndices.size() - 1) * rowGap + padding;
-    theme.box(ImVec2(origin.x, y), ImVec2(width, savedHeight), theme.surface, theme.background, theme.border, 10);
+    theme.card(ImVec2(origin.x, y), ImVec2(width, savedHeight), theme.green);
     theme.heading(ImVec2(origin.x + padding, y + padding), wideSavedHeader ? innerWidth - 430 * s : innerWidth,
-        ui::Icon::Wifi, "Saved WiFi devices", "Manage your saved wireless devices");
+        ui::Icon::Wifi, "Saved WiFi devices", "Manage your saved wireless devices", theme.green);
     float savedControlsWidth = wideSavedHeader ? 420 * s : innerWidth;
     float savedControlsX = origin.x + width - padding - savedControlsWidth;
     float savedControlsY = y + (wideSavedHeader ? 20 : 72) * s;
@@ -572,7 +598,7 @@ void App::renderConnectionManager(FilePanel& panel) {
     const char* sorts[] = { "Sort by name", "Sort by address", "Auto first" };
     ImGui::SetCursorScreenPos(ImVec2(origin.x + width - padding - 146 * s, savedControlsY));
     ImGui::SetNextItemWidth(146 * s);
-    if (ImGui::BeginCombo("##SavedDeviceSort", sorts[m_savedConnectionSort], ImGuiComboFlags_NoArrowButton)) {
+    if (ui::beginCombo("##SavedDeviceSort", sorts[m_savedConnectionSort], ImGuiComboFlags_NoArrowButton)) {
         for (int i = 0; i < 3; ++i)
             if (ImGui::Selectable(sorts[i], m_savedConnectionSort == i)) m_savedConnectionSort = i;
         ImGui::EndCombo();
@@ -592,24 +618,25 @@ void App::renderConnectionManager(FilePanel& panel) {
         std::string address = wifiAddress(saved);
         ImVec2 p(origin.x + padding, y + savedHeader + row * (rowHeight + rowGap));
         theme.box(p, ImVec2(innerWidth, rowHeight), theme.raised, theme.surface, theme.border, 9);
-        theme.tile(ui::Icon::Phone, ImVec2(p.x + 16 * s, p.y + 10 * s), 32);
+        theme.tile(ui::Icon::Phone, ImVec2(p.x + 16 * s, p.y + (compactRows ? 10 * s : (rowHeight - 32 * s) * 0.5f)), 32 * s / theme.s, theme.green);
         float actionsX = compactRows ? p.x + 16 * s : p.x + innerWidth - 430 * s;
         float actionsY = p.y + (compactRows ? 56 : 9) * s;
         float textWidth = compactRows ? innerWidth - 76 * s : actionsX - p.x - 82 * s;
         float nameWidth = compactRows ? textWidth : textWidth * .53f;
-        theme.label(ImVec2(p.x + 76 * s, p.y + (compactRows ? 10 : 17) * s), savedName(saved), nameWidth, theme.text, 14, true);
+        const float nameY = compactRows ? p.y + 10 * s : p.y + (rowHeight - 14 * theme.s) * 0.5f - 1 * s;
+        theme.label(ImVec2(p.x + 76 * s, nameY), savedName(saved), nameWidth, theme.text, 14, true);
         theme.label(ImVec2(compactRows ? p.x + 76 * s : p.x + 76 * s + nameWidth + 12 * s,
-            p.y + (compactRows ? 31 : 17) * s), address, compactRows ? textWidth : textWidth - nameWidth - 12 * s, theme.muted, 13);
+            compactRows ? p.y + 31 * s : p.y + (rowHeight - 13 * theme.s) * 0.5f - 1 * s), address,
+            compactRows ? textWidth : textWidth - nameWidth - 12 * s, theme.muted, 13);
         ImGui::PushID(address.c_str());
-        ImGui::SetCursorScreenPos(ImVec2(actionsX, actionsY + 2 * s));
+        if (!compactRows) actionsY = p.y + (rowHeight - 34 * s) * 0.5f;
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4 * s, 4 * s));
-        ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 4 * s);
-        ImGui::PushStyleColor(ImGuiCol_FrameBg, saved.autoConnect ? rgb(24, 186, 246) : theme.background);
-        ImGui::PushStyleColor(ImGuiCol_CheckMark, rgb(255, 255, 255));
-        if (ImGui::Checkbox("Auto##Reconnect", &saved.autoConnect)) m_prefs.save();
+        ImGui::SetCursorScreenPos(ImVec2(actionsX, actionsY + (34 * s - ImGui::GetFrameHeight()) * 0.5f));
+        ImGui::PushStyleColor(ImGuiCol_CheckMark, ImGui::GetStyleColorVec4(ImGuiCol_CheckMark));
+        if (ui::checkbox("Auto##Reconnect", &saved.autoConnect)) m_prefs.save();
         ui::tooltip("Automatically reconnect to this device when the app starts");
-        ImGui::PopStyleColor(2);
-        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor();
+        ImGui::PopStyleVar();
         float buttonWidth = compactRows ? std::max(30 * s, std::min(114 * s, (innerWidth - (narrowRows ? 70 : 146) * s) * .5f)) : 114 * s;
         float connectX = narrowRows ? actionsX : compactRows ? actionsX + 78 * s : actionsX + 126 * s;
         float buttonY = actionsY + (narrowRows ? 34 * s : 0);
@@ -666,15 +693,27 @@ void App::renderConnectionManager(FilePanel& panel) {
     stepHeight = std::max(66 * s, stepHeight);
     float stepsHeight = horizontalSteps ? stepHeight : 3 * (stepHeight + 10 * s) - 10 * s;
     float setupHeight = 76 * s + stepsHeight + padding + (wideSetup ? 0 : 142 * s);
-    theme.box(ImVec2(origin.x, y), ImVec2(width, setupHeight), theme.surface, theme.background, theme.border, 10);
+    theme.card(ImVec2(origin.x, y), ImVec2(width, setupHeight), ImGui::GetStyleColorVec4(ImGuiCol_CheckMark));
     theme.heading(ImVec2(origin.x + padding, y + padding), stepsWidth, ui::Icon::Gear,
-        "Setup & Instructions", "Follow these steps to connect your devices");
+        "Setup & Instructions", "Follow these steps to connect your devices", m_theme.gradientSecondary);
     for (int i = 0; i < 3; ++i) {
         ImVec2 p(origin.x + padding + (horizontalSteps ? i * (stepWidth + 12 * s) : 0),
             y + 76 * s + (horizontalSteps ? 0 : i * (stepHeight + 10 * s)));
         const ImVec2 center(p.x + 21 * s, p.y + 21 * s);
-        ImGui::GetWindowDrawList()->AddCircleFilled(center, 21 * s,
-            ImGui::GetColorU32(rgb(29, 72, 129)));
+        {
+            auto* stepDraw = ImGui::GetWindowDrawList();
+            ImVec4 glow = m_theme.gradientPrimary; glow.w = 0.18f;
+            stepDraw->AddCircleFilled(ImVec2(center.x, center.y + 2 * s), 23 * s, theme.color(glow));
+            const int first = stepDraw->VtxBuffer.Size;
+            stepDraw->AddCircleFilled(center, 21 * s, theme.color(m_theme.gradientPrimary), 40);
+            for (int v = first; v < stepDraw->VtxBuffer.Size; ++v) {
+                auto& vertex = stepDraw->VtxBuffer[v];
+                const float t = std::clamp(((vertex.pos.x - center.x) + (vertex.pos.y - center.y)) / (84 * s) + 0.5f, 0.0f, 1.0f);
+                const ImVec4 a = m_theme.gradientPrimary, b = m_theme.gradientSecondary;
+                const ImU32 alpha = vertex.col & IM_COL32_A_MASK;
+                vertex.col = (theme.color(ImVec4(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, 1)) & ~IM_COL32_A_MASK) | alpha;
+            }
+        }
         ImFont* numberFont = ui::semiboldFont ? ui::semiboldFont : ImGui::GetFont();
         const char number[] = { static_cast<char>('1' + i), '\0' };
         if (const auto* glyph = numberFont->FindGlyph(number[0])) {
@@ -684,8 +723,11 @@ void App::renderConnectionManager(FilePanel& panel) {
             const ImVec2 textPosition(
                 std::round(center.x - (glyph->X0 + glyph->X1) * glyphScale * 0.5f),
                 std::round(center.y - (glyph->Y0 + glyph->Y1) * glyphScale * 0.5f));
+            const ImVec4 mid((m_theme.gradientPrimary.x + m_theme.gradientSecondary.x) * 0.5f,
+                (m_theme.gradientPrimary.y + m_theme.gradientSecondary.y) * 0.5f,
+                (m_theme.gradientPrimary.z + m_theme.gradientSecondary.z) * 0.5f, 1);
             ImGui::GetWindowDrawList()->AddText(numberFont, fontSize, textPosition,
-                theme.color(rgb(69, 210, 255)), number);
+                ui::brightness(mid) > 0.5f ? IM_COL32(10, 15, 24, 255) : IM_COL32(255, 255, 255, 255), number);
         }
         theme.label(ImVec2(p.x + 64 * s, p.y + 5 * s), stepTitles[i], stepWidth - 64 * s, theme.text, 13, true);
         ImGui::GetWindowDrawList()->AddText(ImGui::GetFont(), 13 * s, ImVec2(p.x + 64 * s, p.y + 29 * s),
@@ -696,12 +738,12 @@ void App::renderConnectionManager(FilePanel& panel) {
     float setupActionsY = wideSetup ? y + 24 * s : y + 76 * s + stepsHeight + 18 * s;
     if (wideSetup) ImGui::GetWindowDrawList()->AddLine(ImVec2(setupActionsX - 28 * s, y + 20 * s),
         ImVec2(setupActionsX - 28 * s, y + setupHeight - 20 * s), theme.color(theme.border), s);
-    if (theme.button("##RunConnectionSetup", "Run Setup Wizard", ui::Icon::Wand,
-        ImVec2(setupActionsX, setupActionsY), ImVec2(setupActionsWidth, 38 * s), rgb(255, 255, 255), 1)) {
+    ImGui::SetCursorScreenPos(ImVec2(setupActionsX, setupActionsY));
+    if (ui::button("Run Setup Wizard##RunConnectionSetup", ui::Icon::Wand, ui::Appearance::Primary, ImVec2(setupActionsWidth, 40 * s))) {
         openWifiWizard();
     }
-    if (theme.button("##PairConnectionWifi", "Pair with QR code (Android 11+)", ui::Icon::Link,
-        ImVec2(setupActionsX, setupActionsY + 50 * s), ImVec2(setupActionsWidth, 38 * s), rgb(255, 255, 241), 2)) {
+    ImGui::SetCursorScreenPos(ImVec2(setupActionsX, setupActionsY + 50 * s));
+    if (ui::button("Pair with QR code (Android 11+)##PairConnectionWifi", ui::Icon::Link, ui::Appearance::Secondary, ImVec2(setupActionsWidth, 40 * s))) {
         openWifiPairing();
     }
     float statusWidth = ImGui::CalcTextSize(countLabel.c_str()).x + 20 * s;
@@ -712,5 +754,5 @@ void App::renderConnectionManager(FilePanel& panel) {
     ImGui::Dummy(ImVec2(width, s));
     ImGui::EndChild();
     ImGui::PopStyleVar(4);
-    ImGui::PopStyleColor(8);
+    ImGui::PopStyleColor(7);
 }

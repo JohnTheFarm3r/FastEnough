@@ -226,7 +226,7 @@ void App::renderWifiPairingDialog() {
         ImVec2 origin = ImGui::GetCursorScreenPos();
         const float width = ImGui::GetContentRegionAvail().x;
         const float footerY = origin.y + ImGui::GetContentRegionAvail().y - 36 * s;
-        theme.tile(ui::Icon::Link, origin, 48);
+        theme.tile(ui::Icon::Link, origin, 48, ImGui::GetStyleColorVec4(ImGuiCol_CheckMark));
         theme.label(ImVec2(origin.x + 66 * s, origin.y), "Pair over WiFi", width - 110 * s, theme.text, 24, true);
         theme.label(ImVec2(origin.x + 66 * s, origin.y + 32 * s), "Android 11 and later. No USB cable needed.", width - 110 * s, theme.muted, 13);
         if (theme.button("##ClosePairing", "", ui::Icon::Close,
@@ -234,18 +234,26 @@ void App::renderWifiPairingDialog() {
         if (ImGui::IsKeyPressed(ImGuiKey_Escape)) close();
 
         const bool ready = !m_pairingReadyAddress.empty();
-        ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + 70 * s));
-        for (int tab = 0; tab < 2; ++tab) {
-            bool active = m_pairingUseQr == (tab == 0);
-            ImGui::BeginDisabled(m_pairingDone || m_pairingWorkerBusy);
-            if (theme.button(tab == 0 ? "##PairQr" : "##PairCode", tab == 0 ? "Scan QR code" : "Use pairing code", ui::Icon::None,
-                ImVec2(origin.x + tab * 180 * s, origin.y + 70 * s), ImVec2(170 * s, 36 * s),
-                active ? theme.blue : theme.muted, active ? 4 : 0) && !active) {
-                m_pairingUseQr = tab == 0;
-                startWifiQrSession();
-                if (!m_pairingUseQr) m_pairingStatus = "Enter the details shown on your phone";
+        {
+            const ImVec2 track(origin.x, origin.y + 70 * s);
+            const ImVec2 trackSize(360 * s, 40 * s);
+            auto* draw = ImGui::GetWindowDrawList();
+            draw->AddRectFilled(track, ImVec2(track.x + trackSize.x, track.y + trackSize.y), theme.color(theme.background), 10 * s);
+            draw->AddRect(track, ImVec2(track.x + trackSize.x, track.y + trackSize.y), theme.color(theme.border), 10 * s);
+            for (int tab = 0; tab < 2; ++tab) {
+                bool active = m_pairingUseQr == (tab == 0);
+                ImGui::BeginDisabled(m_pairingDone || m_pairingWorkerBusy);
+                ImGui::SetCursorScreenPos(ImVec2(track.x + 4 * s + tab * (trackSize.x - 8 * s) * 0.5f, track.y + 4 * s));
+                if (ui::button(tab == 0 ? "Scan QR code##PairQr" : "Use pairing code##PairCode",
+                        tab == 0 ? ui::Icon::Link : ui::Icon::Settings,
+                        active ? ui::Appearance::Selected : ui::Appearance::Quiet,
+                        ImVec2((trackSize.x - 8 * s) * 0.5f, trackSize.y - 8 * s)) && !active) {
+                    m_pairingUseQr = tab == 0;
+                    startWifiQrSession();
+                    if (!m_pairingUseQr) m_pairingStatus = "Enter the details shown on your phone";
+                }
+                ImGui::EndDisabled();
             }
-            ImGui::EndDisabled();
         }
         ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + 124 * s));
         ImGui::BeginChild("##PairingBody", ImVec2(width, std::max(50 * s, footerY - origin.y - 140 * s)), 0);
@@ -278,7 +286,9 @@ void App::renderWifiPairingDialog() {
                 const float extent = pixel * (m_pairingQrSize + 8);
                 ImVec2 base(std::floor(p.x + (qrArea - extent) * .5f), std::floor(p.y));
                 auto* draw = ImGui::GetWindowDrawList();
-                draw->AddRectFilled(base, ImVec2(base.x + extent, base.y + extent), IM_COL32_WHITE);
+                ImVec4 glow = ImGui::GetStyleColorVec4(ImGuiCol_CheckMark); glow.w = 0.16f;
+                draw->AddRectFilled(ImVec2(base.x - 6 * s, base.y - 4 * s), ImVec2(base.x + extent + 6 * s, base.y + extent + 10 * s), theme.color(glow), 16 * s);
+                draw->AddRectFilled(base, ImVec2(base.x + extent, base.y + extent), IM_COL32_WHITE, 12 * s);
                 for (int y = 0; y < m_pairingQrSize; ++y) {
                     for (int x = 0; x < m_pairingQrSize; ++x) {
                         if (!m_pairingQrModules[y * m_pairingQrSize + x]) continue;
@@ -286,9 +296,10 @@ void App::renderWifiPairingDialog() {
                         draw->AddRectFilled(cell, ImVec2(cell.x + pixel, cell.y + pixel), IM_COL32(0, 0, 0, 255));
                     }
                 }
-                theme.label(ImVec2(p.x, p.y + qrArea + 8 * s),
-                    "Expires in " + std::to_string(std::max(0, static_cast<int>(m_pairingExpiresAt - now))) + " seconds",
-                    qrArea, theme.muted, 12);
+                const std::string expires = "Expires in " + std::to_string(std::max(0, static_cast<int>(m_pairingExpiresAt - now))) + " seconds";
+                const float expiresWidth = ImGui::GetFont()->CalcTextSizeA(12 * s, FLT_MAX, 0, expires.c_str()).x;
+                theme.label(ImVec2(p.x + std::max(0.0f, (qrArea - expiresWidth) * 0.5f), p.y + qrArea + 14 * s),
+                    expires, qrArea, theme.muted, 12);
             } else {
                 theme.box(p, ImVec2(qrArea, qrArea), theme.raised, theme.surface, theme.border);
                 theme.label(ImVec2(p.x + 18 * s, p.y + qrArea * .38f), expired ? "QR code expired" : "QR code unavailable", qrArea - 36 * s, theme.text, 16, true);
@@ -300,16 +311,34 @@ void App::renderWifiPairingDialog() {
             const char* details[] = {"Settings > Developer options", "Use the scanner inside Android settings.", "Keep your phone and PC on the same WiFi network."};
             for (int i = 0; i < 3; ++i) {
                 float y = p.y + i * 80 * s;
-                ImGui::GetWindowDrawList()->AddCircleFilled(ImVec2(textX + 13 * s, y + 14 * s), 13 * s, theme.color(theme.raised));
-                theme.label(ImVec2(textX + 9 * s, y + 5 * s), std::to_string(i + 1), 16 * s, theme.blue, 14, true);
-                theme.label(ImVec2(textX + 39 * s, y), titles[i], width - qrArea - 68 * s, theme.text, 14, true);
-                ImGui::SetCursorScreenPos(ImVec2(textX + 39 * s, y + 25 * s));
+                auto* stepDraw = ImGui::GetWindowDrawList();
+                const ImVec2 center(textX + 14 * s, y + 13 * s);
+                ui::gradientRect(stepDraw, ImVec2(center.x - 14 * s, center.y - 14 * s), ImVec2(center.x + 14 * s, center.y + 14 * s),
+                    m_theme.gradientPrimary, m_theme.gradientSecondary, 14 * s);
+                ImFont* numberFont = ui::semiboldFont ? ui::semiboldFont : ImGui::GetFont();
+                const std::string number = std::to_string(i + 1);
+                const ImVec2 numberSize = numberFont->CalcTextSizeA(14 * s, FLT_MAX, 0, number.c_str());
+                const ImVec4 mid((m_theme.gradientPrimary.x + m_theme.gradientSecondary.x) * 0.5f,
+                    (m_theme.gradientPrimary.y + m_theme.gradientSecondary.y) * 0.5f, (m_theme.gradientPrimary.z + m_theme.gradientSecondary.z) * 0.5f, 1);
+                stepDraw->AddText(numberFont, 14 * s, ImVec2(center.x - numberSize.x * 0.5f, center.y - numberSize.y * 0.5f),
+                    ui::brightness(mid) > 0.5f ? IM_COL32(10, 15, 24, 255) : IM_COL32(255, 255, 255, 255), number.c_str());
+                theme.label(ImVec2(textX + 42 * s, y + 3 * s), titles[i], width - qrArea - 70 * s, theme.text, 14, true);
+                ImGui::SetCursorScreenPos(ImVec2(textX + 42 * s, y + 27 * s));
                 ImGui::PushStyleColor(ImGuiCol_Text, theme.muted);
                 ImGui::TextWrapped("%s", details[i]);
                 ImGui::PopStyleColor();
             }
-            ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + qrArea + 42 * s));
-            if (!expired && m_pairingError.empty()) ImGui::TextColored(theme.blue, "%s", m_pairingStatus.c_str());
+            if (!expired && m_pairingError.empty()) {
+                const ImVec2 status(textX, p.y + 3 * 80 * s);
+                auto* draw = ImGui::GetWindowDrawList();
+                const float angle = (float)ImGui::GetTime() * 4.0f;
+                draw->PathArcTo(ImVec2(status.x + 10 * s, status.y + 10 * s), 7 * s, angle, angle + 4.4f, 20);
+                draw->PathStroke(theme.color(theme.blue), 0, 2 * s);
+                theme.label(ImVec2(status.x + 28 * s, status.y + 2 * s), m_pairingStatus, width - qrArea - 60 * s, theme.blue, 13, true);
+                ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + qrArea + 42 * s));
+            } else {
+                ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + qrArea + 42 * s));
+            }
         } else {
             ImGui::TextWrapped("On your phone, open Settings > Developer options > Wireless debugging, then tap Pair device with pairing code.");
             ImGui::Spacing();
@@ -330,11 +359,12 @@ void App::renderWifiPairingDialog() {
             ImGui::PopStyleColor();
         }
         ImGui::EndChild();
-        if (theme.button("##CancelPairing", ready ? "Done" : "Cancel", ui::Icon::None,
-            ImVec2(origin.x, footerY), ImVec2(102 * s, 36 * s), theme.muted)) close();
+        ImGui::SetCursorScreenPos(ImVec2(origin.x, footerY));
+        if (ui::button(ready ? "Done##CancelPairing" : "Cancel##CancelPairing", ui::Icon::None, ui::Appearance::Secondary,
+            ImVec2(110 * s, 38 * s))) close();
         if (ready) {
-            if (theme.button("##OpenPairedPhone", "Open files", ui::Icon::Folder,
-                ImVec2(origin.x + width - 154 * s, footerY), ImVec2(154 * s, 36 * s), ui::rgb(255, 255, 255), 1)) {
+            ImGui::SetCursorScreenPos(ImVec2(origin.x + width - 160 * s, footerY));
+            if (ui::button("Open files##OpenPairedPhone", ui::Icon::Folder, ui::Appearance::Primary, ImVec2(160 * s, 38 * s))) {
                 std::string address = m_pairingReadyAddress;
                 FilePanel& panel = m_rightPanel;
                 if (!panel.isAndroid || panel.isApps || panel.isConnections) switchPanelMode(panel, true);
@@ -361,16 +391,17 @@ void App::renderWifiPairingDialog() {
                 parseAdbEndpoint(m_pairingIp).has_value() && std::string(m_pairingCode).size() == 6 &&
                     std::all_of(m_pairingCode, m_pairingCode + 6, [](unsigned char c) { return c >= '0' && c <= '9'; });
             ImGui::BeginDisabled(!valid || m_pairingWorkerBusy);
-            if (theme.button("##SubmitPairing", m_pairingDone ? "Connect" : "Pair device", ui::Icon::Wifi,
-                ImVec2(origin.x + width - 154 * s, footerY), ImVec2(154 * s, 36 * s), ui::rgb(255, 255, 255), 1)) {
+            ImGui::SetCursorScreenPos(ImVec2(origin.x + width - 160 * s, footerY));
+            if (ui::button(m_pairingDone ? "Connect##SubmitPairing" : "Pair device##SubmitPairing", ui::Icon::Wifi,
+                    ui::Appearance::Primary, ImVec2(160 * s, 38 * s))) {
                 m_pairingExpiresAt = now + 30;
                 pollWifiPairing(m_pairingDone ? 2 : 1);
             }
             ImGui::EndDisabled();
         } else {
             ImGui::BeginDisabled(m_pairingWorkerBusy);
-            if (theme.button("##NewQr", "New QR code", ui::Icon::Refresh,
-                ImVec2(origin.x + width - 154 * s, footerY), ImVec2(154 * s, 36 * s), theme.blue)) startWifiQrSession();
+            ImGui::SetCursorScreenPos(ImVec2(origin.x + width - 160 * s, footerY));
+            if (ui::button("New QR code##NewQr", ui::Icon::Refresh, ui::Appearance::Secondary, ImVec2(160 * s, 38 * s))) startWifiQrSession();
             ImGui::EndDisabled();
         }
         ImGui::EndPopup();

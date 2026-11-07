@@ -1507,6 +1507,8 @@ App::~App() {
     }
     ++m_pairingGeneration;
     if (m_pairingThread.joinable()) m_pairingThread.join();
+    m_openFile.cancelRequested = true;
+    if (m_openFileThread.joinable()) m_openFileThread.join();
     for (int slot = 0; slot < deviceSessionCount(); ++slot) deviceForSlot(slot).cancelCommands();
     m_secondaryChannel.cancelCommands();
     m_batchCV.notify_all();
@@ -1899,45 +1901,50 @@ void App::setupStyle() {
     if (g_mainHwnd) DwmSetWindowAttribute(g_mainHwnd, 20, &darkTitle, sizeof(darkTitle));
     if (m_resolvedLightTheme) ImGui::StyleColorsLight(); else ImGui::StyleColorsDark();
     ImGuiStyle& style = ImGui::GetStyle();
-    style.WindowRounding = 8;
-    style.ChildRounding = 8;
-    style.FrameRounding = 5;
-    style.PopupRounding = 7;
-    style.GrabRounding = 4;
-    style.ScrollbarRounding = 6;
-    style.TabRounding = 5;
+    style.WindowRounding = 10;
+    style.ChildRounding = 10;
+    style.FrameRounding = 7;
+    style.PopupRounding = 10;
+    style.GrabRounding = 6;
+    style.ScrollbarRounding = 9;
+    style.TabRounding = 7;
     style.WindowBorderSize = style.ChildBorderSize = style.PopupBorderSize = 1;
     style.FrameBorderSize = 1;
     style.WindowPadding = ImVec2(12, 12);
-    style.FramePadding = ImVec2(9, 6);
-    style.ItemSpacing = ImVec2(7, 6);
-    style.ItemInnerSpacing = ImVec2(6, 4);
+    style.FramePadding = ImVec2(10, 6);
+    style.ItemSpacing = ImVec2(8, 6);
+    style.ItemInnerSpacing = ImVec2(8, 4);
     style.CellPadding = ImVec2(10, 5);
     style.ScrollbarSize = 10;
-    style.GrabMinSize = 10;
+    style.GrabMinSize = 12;
+    style.SeparatorTextBorderSize = 1;
     style.DisabledAlpha = 0.45f;
     style.Alpha = 1;
     style.AntiAliasedLines = style.AntiAliasedFill = true;
     auto color = [](int r, int g, int b, float a = 1.0f) { return ImVec4(r/255.0f,g/255.0f,b/255.0f,a); };
+    auto blend = [](ImVec4 a, ImVec4 b, float t) {
+        return ImVec4(a.x+(b.x-a.x)*t, a.y+(b.y-a.y)*t, a.z+(b.z-a.z)*t, a.w+(b.w-a.w)*t);
+    };
     bool light = m_resolvedLightTheme;
-    ImVec4 canvas = light ? color(240,244,250) : color(7,11,18);
-    ImVec4 surface = light ? color(255,255,255) : color(13,20,30);
-    ImVec4 raised = light ? color(235,241,249) : color(21,32,47);
-    ImVec4 hover = light ? color(223,233,246) : color(29,44,63);
-    ImVec4 selected = light ? color(218,234,255) : color(25,49,79);
-    ImVec4 border = light ? color(204,215,230) : color(36,51,71);
     ImVec4 accent = m_theme.gradientPrimary;
+    ImVec4 canvas = light ? color(238,242,249) : color(6,10,17);
+    ImVec4 surface = light ? color(255,255,255) : color(12,18,29);
+    ImVec4 raised = light ? color(233,239,248) : color(20,30,46);
+    ImVec4 hover = light ? color(221,231,245) : color(28,42,63);
+    ImVec4 selected = light ? color(207,226,252) : color(29,55,92);
+    ImVec4 border = light ? color(200,212,229) : color(32,46,67);
+    ImVec4 inset = light ? color(246,248,252) : color(8,13,22);
     auto* c = style.Colors;
-    c[ImGuiCol_Text] = light ? color(32,43,61) : color(231,234,240);
-    c[ImGuiCol_TextDisabled] = light ? color(86,103,127) : color(147,167,193);
+    c[ImGuiCol_Text] = light ? color(26,38,58) : color(234,239,247);
+    c[ImGuiCol_TextDisabled] = light ? color(84,101,126) : color(141,160,188);
     c[ImGuiCol_WindowBg] = canvas;
     c[ImGuiCol_ChildBg] = surface;
-    c[ImGuiCol_PopupBg] = light ? surface : color(18,28,42);
+    c[ImGuiCol_PopupBg] = light ? surface : color(16,24,38);
     c[ImGuiCol_Border] = border;
     c[ImGuiCol_BorderShadow] = color(0,0,0,0);
-    c[ImGuiCol_FrameBg] = canvas;
-    c[ImGuiCol_FrameBgHovered] = hover;
-    c[ImGuiCol_FrameBgActive] = selected;
+    c[ImGuiCol_FrameBg] = inset;
+    c[ImGuiCol_FrameBgHovered] = blend(inset, hover, 0.7f);
+    c[ImGuiCol_FrameBgActive] = blend(inset, selected, 0.5f);
     c[ImGuiCol_TitleBg] = surface;
     c[ImGuiCol_TitleBgActive] = raised;
     c[ImGuiCol_TitleBgCollapsed] = surface;
@@ -1946,31 +1953,35 @@ void App::setupStyle() {
     c[ImGuiCol_ButtonHovered] = hover;
     c[ImGuiCol_ButtonActive] = selected;
     c[ImGuiCol_Header] = selected;
-    c[ImGuiCol_HeaderHovered] = hover;
+    c[ImGuiCol_HeaderHovered] = blend(surface, hover, light ? 0.9f : 0.85f);
     c[ImGuiCol_HeaderActive] = selected;
     c[ImGuiCol_Separator] = border;
     c[ImGuiCol_SeparatorHovered] = accent;
     c[ImGuiCol_SeparatorActive] = accent;
-    c[ImGuiCol_TableHeaderBg] = raised;
+    c[ImGuiCol_ResizeGrip] = color(0,0,0,0);
+    c[ImGuiCol_ResizeGripHovered] = blend(border, accent, 0.5f);
+    c[ImGuiCol_ResizeGripActive] = accent;
+    c[ImGuiCol_TableHeaderBg] = light ? color(236,241,249) : color(17,26,40);
     c[ImGuiCol_TableBorderStrong] = border;
     c[ImGuiCol_TableBorderLight] = color(0,0,0,0);
     c[ImGuiCol_TableRowBg] = color(0,0,0,0);
-    c[ImGuiCol_TableRowBgAlt] = light ? color(235,241,249,0.35f) : color(21,32,47,0.22f);
+    c[ImGuiCol_TableRowBgAlt] = light ? color(233,239,248,0.45f) : color(22,33,50,0.32f);
     c[ImGuiCol_CheckMark] = accent;
     c[ImGuiCol_SliderGrab] = accent;
-    c[ImGuiCol_SliderGrabActive] = accent;
-    c[ImGuiCol_ScrollbarBg] = surface;
-    c[ImGuiCol_ScrollbarGrab] = border;
-    c[ImGuiCol_ScrollbarGrabHovered] = c[ImGuiCol_TextDisabled];
+    c[ImGuiCol_SliderGrabActive] = blend(accent, color(255,255,255), 0.2f);
+    c[ImGuiCol_ScrollbarBg] = color(0,0,0,0);
+    c[ImGuiCol_ScrollbarGrab] = light ? color(190,203,222) : color(43,59,83);
+    c[ImGuiCol_ScrollbarGrabHovered] = light ? color(160,176,200) : color(63,84,114);
     c[ImGuiCol_ScrollbarGrabActive] = accent;
     c[ImGuiCol_Tab] = raised;
     c[ImGuiCol_TabSelected] = selected;
     c[ImGuiCol_TabHovered] = hover;
-    c[ImGuiCol_TextSelectedBg] = selected;
+    c[ImGuiCol_TextSelectedBg] = blend(selected, accent, 0.25f);
     c[ImGuiCol_NavHighlight] = accent;
     c[ImGuiCol_DragDropTarget] = accent;
     c[ImGuiCol_PlotHistogram] = accent;
-    c[ImGuiCol_ModalWindowDimBg] = color(0,0,0,light?0.2f:0.5f);
+    c[ImGuiCol_PlotLines] = accent;
+    c[ImGuiCol_ModalWindowDimBg] = color(0,0,0,light?0.25f:0.55f);
 }
 
 bool App::modernButton(const char* label, const ImVec2& requestedSize, ButtonTone tone) {
@@ -2263,6 +2274,20 @@ void App::render() {
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0,0));
     ImGui::Begin("##MainWindow", nullptr, mainFlags);
     ImGui::PopStyleVar(4);
+    {
+        ImDrawList* background = ImGui::GetWindowDrawList();
+        const ImVec2 a = ImGui::GetWindowPos();
+        const ImVec2 b(a.x + ImGui::GetWindowWidth(), a.y + ImGui::GetWindowHeight());
+        const float w = b.x - a.x, h = b.y - a.y;
+        ImVec4 primaryGlow = m_theme.gradientPrimary; primaryGlow.w = m_resolvedLightTheme ? 0.07f : 0.09f;
+        ImVec4 secondaryGlow = m_theme.gradientSecondary; secondaryGlow.w = m_resolvedLightTheme ? 0.06f : 0.10f;
+        const ImU32 clear = ImGui::GetColorU32(ImVec4(primaryGlow.x, primaryGlow.y, primaryGlow.z, 0));
+        const ImU32 clearSecondary = ImGui::GetColorU32(ImVec4(secondaryGlow.x, secondaryGlow.y, secondaryGlow.z, 0));
+        background->AddRectFilledMultiColor(a, ImVec2(a.x + w * 0.6f, a.y + h * 0.5f),
+            ImGui::GetColorU32(primaryGlow), clear, clear, clear);
+        background->AddRectFilledMultiColor(ImVec2(a.x + w * 0.4f, a.y + h * 0.45f), b,
+            clearSecondary, clearSecondary, ImGui::GetColorU32(secondaryGlow), clearSecondary);
+    }
     renderWorkspaceHeader();
     const float headerHeight = ui::controlHeight()+16*s;
     ImGui::SetCursorPosY(headerHeight);
@@ -2276,7 +2301,7 @@ void App::render() {
         }
     }
     float dockHeight = transferDockHeight();
-    float statusHeight = std::max(28*s, ImGui::GetFontSize()+10*s);
+    float statusHeight = std::max(36*s, ImGui::GetFontSize()+18*s);
     float bodyY = ImGui::GetCursorPosY()+8*s;
     float bodyHeight = std::max(120*s, vp->WorkSize.y-bodyY-dockHeight-statusHeight-8*s);
     ImGui::SetCursorPosY(bodyY);
@@ -2303,11 +2328,38 @@ void App::render() {
                 ImVec4 accent=ImGui::GetStyleColorVec4(ImGuiCol_CheckMark);
                 border=ImVec4(border.x+(accent.x-border.x)*0.45f,border.y+(accent.y-border.y)*0.45f,border.z+(accent.z-border.z)*0.45f,1);
             }
+            {
+                const ImVec2 paneMin=ImGui::GetCursorScreenPos();
+                const ImVec2 paneMax(paneMin.x+paneWidth,paneMin.y+bodyHeight);
+                const float rounding=ImGui::GetStyle().ChildRounding;
+                ImDrawList* parentDraw=ImGui::GetWindowDrawList();
+                if(active) {
+                    ImVec4 glow=ImGui::GetStyleColorVec4(ImGuiCol_CheckMark);glow.w=m_resolvedLightTheme?0.10f:0.07f;
+                    parentDraw->AddRectFilled(ImVec2(paneMin.x-3*s,paneMin.y-2*s),ImVec2(paneMax.x+3*s,paneMax.y+5*s),ImGui::GetColorU32(glow),rounding+4*s);
+                }
+                const ImVec4 body=ImGui::GetStyleColorVec4(ImGuiCol_ChildBg);
+                ui::gradientRect(parentDraw,paneMin,paneMax,ui::shade(body,m_resolvedLightTheme?0.0f:0.03f),
+                    ui::shade(body,m_resolvedLightTheme?-0.02f:-0.10f),rounding);
+            }
             ImGui::PushStyleColor(ImGuiCol_Border,border);
+            ImGui::PushStyleColor(ImGuiCol_ChildBg,ImVec4(0,0,0,0));
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(12*s,10*s));
             ImGui::BeginChild(side==PanelSide::Left?"##LeftPanel":"##RightPanel",ImVec2(paneWidth,bodyHeight),ImGuiChildFlags_Borders,ImGuiWindowFlags_NoScrollbar);
-            ImGui::PopStyleVar();ImGui::PopStyleColor();
+            ImGui::PopStyleVar();ImGui::PopStyleColor(2);
             auto min=ImGui::GetWindowPos();auto size=ImGui::GetWindowSize();
+            if(active) {
+                ImDrawList* paneDraw=ImGui::GetWindowDrawList();
+                const float inset=ImGui::GetStyle().ChildRounding;
+                const float mid=min.x+size.x*0.5f;
+                ImVec4 bright=ImGui::GetStyleColorVec4(ImGuiCol_CheckMark);bright.w=0.85f;
+                ImVec4 tail=m_theme.gradientSecondary;tail.w=0.0f;
+                ImVec4 clear=bright;clear.w=0.0f;
+                ImVec4 secondary=m_theme.gradientSecondary;secondary.w=0.85f;
+                paneDraw->AddRectFilledMultiColor(ImVec2(min.x+inset,min.y+1),ImVec2(mid,min.y+1+2*s),
+                    ImGui::GetColorU32(clear),ImGui::GetColorU32(bright),ImGui::GetColorU32(bright),ImGui::GetColorU32(clear));
+                paneDraw->AddRectFilledMultiColor(ImVec2(mid,min.y+1),ImVec2(min.x+size.x-inset,min.y+1+2*s),
+                    ImGui::GetColorU32(secondary),ImGui::GetColorU32(tail),ImGui::GetColorU32(tail),ImGui::GetColorU32(secondary));
+            }
             if(side==PanelSide::Left){m_leftPanelMin=min;m_leftPanelMax=ImVec2(min.x+size.x,min.y+size.y);}
             else {m_rightPanelMin=min;m_rightPanelMax=ImVec2(min.x+size.x,min.y+size.y);}
             if(ImGui::IsWindowFocused(ImGuiFocusedFlags_ChildWindows))m_lastFocusedPanel=&panel;
@@ -2351,6 +2403,7 @@ void App::render() {
     ImGui::SetCursorPosY(bodyY+bodyHeight+8*s+dockHeight);
     renderStatusBar();
     ImGui::End();
+    renderOpenFileCard();
     renderWorkspaceDrawer();
     if(m_showDeviceSettings)renderDeviceBar();
 
@@ -2619,6 +2672,8 @@ bool App::wantsHighFps() {
 }
 
 void App::renderMenuBar() {
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10*ui::scale(), 10*ui::scale()));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10*ui::scale(), 9*ui::scale()));
     if (ImGui::BeginPopup("##WorkspaceMenu")) {
         if (ImGui::BeginMenu("File")) {
             if (ImGui::MenuItem("Refresh All", "F5")) {
@@ -2926,6 +2981,7 @@ void App::renderMenuBar() {
 
         ImGui::EndPopup();
     }
+    ImGui::PopStyleVar(2);
 }
 
 void App::renderCompareToolbar() {
@@ -2947,7 +3003,7 @@ void App::renderCompareToolbar() {
     else if (m_compareMode == CompareHighlightMode::RightOnly) currentMode = "Right side";
 
     ImGui::SetNextItemWidth(130.0f);
-    if (ImGui::BeginCombo("##CompareMode", currentMode)) {
+    if (ui::beginCombo("##CompareMode", currentMode)) {
         if (ImGui::Selectable("Both sides", m_compareMode == CompareHighlightMode::Both)) {
             m_compareMode = CompareHighlightMode::Both;
         }
@@ -2963,7 +3019,7 @@ void App::renderCompareToolbar() {
         ImGui::SetTooltip("Choose which pane shows items that do not exist on the opposite pane");
 
     ImGui::SameLine(0, 8);
-    if (ImGui::Checkbox("Size/hash##CompareContent", &m_compareContentEnabled)) {
+    if (ui::checkbox("Size/hash##CompareContent", &m_compareContentEnabled)) {
         std::lock_guard<std::mutex> lk(m_compareMutex);
         m_compareContentSignature.clear();
         m_compareContent.clear();
@@ -3197,8 +3253,8 @@ void App::renderFavoritesBar(FilePanel& panel, PanelSide side) {
     }
     for (size_t i=0; i<shortcuts.size(); ++i) {
         const auto& link=shortcuts[i];
-        ImGui::SameLine(0,2*scale);
-        float width=ImGui::CalcTextSize(link.label.c_str()).x+20*scale;
+        ImGui::SameLine(0,5*scale);
+        float width=ImGui::CalcTextSize(link.label.c_str()).x+22*scale;
         if (width+30*scale>ImGui::GetContentRegionAvail().x) {
             if (ui::button("##MoreShortcuts",ui::Icon::Down,ui::Appearance::Quiet,ImVec2(26*scale,26*scale),"More folder shortcuts"))
                 ImGui::OpenPopup("##FolderShortcutMenu");
@@ -3216,7 +3272,11 @@ void App::renderFavoritesBar(FilePanel& panel, PanelSide side) {
             break;
         }
         ImGui::PushID((int)i);
-        if (ui::button(link.label.c_str(),ui::Icon::None,ui::Appearance::Quiet,ImVec2(width,26*scale),link.path.c_str()))
+        std::string linkPath=link.path, currentPath=panel.currentPath;
+        while (linkPath.size()>1 && (linkPath.back()=='\\'||linkPath.back()=='/')) linkPath.pop_back();
+        while (currentPath.size()>1 && (currentPath.back()=='\\'||currentPath.back()=='/')) currentPath.pop_back();
+        const bool here=_stricmp(linkPath.c_str(),currentPath.c_str())==0;
+        if (ui::button(link.label.c_str(),ui::Icon::None,here?ui::Appearance::Selected:ui::Appearance::Secondary,ImVec2(width,24*scale),link.path.c_str()))
             navigateToDirectory(panel,link.path);
         if (link.favoriteIndex>=0 && ImGui::IsItemClicked(ImGuiMouseButton_Right)) removeFavoritePath(link.favoriteIndex);
         ImGui::PopID();
@@ -3452,7 +3512,7 @@ void App::renderDeviceBar() {
             }
             std::string preview = (previewIndex >= 0 && previewIndex < (int)devSnap.size())
                 ? getDevName(previewIndex) : "Select...";
-            if (ImGui::BeginCombo("##DeviceCombo", preview.c_str())) {
+            if (ui::beginCombo("##DeviceCombo", preview.c_str())) {
                 for (int i : physicalDeviceIndices) {
                     std::string label = getDevName(i);
                     bool itemIsPrimary = deviceSession(0).connected && m_device.isServerRunning() &&
@@ -3561,7 +3621,7 @@ void App::renderDeviceBar() {
                 // WiFi auto-connect toggle
                 ImGui::Spacing();
                 bool wifiAuto = m_prefs.wifiAutoConnect;
-                if (ImGui::Checkbox("WiFi Auto##devbar", &wifiAuto)) {
+                if (ui::checkbox("WiFi Auto##devbar", &wifiAuto)) {
                     m_prefs.wifiAutoConnect = wifiAuto;
                     m_prefs.save();
                     if (!wifiAuto) {
@@ -3580,7 +3640,7 @@ void App::renderDeviceBar() {
                 // Keep awake toggle (uses a wakelock held by a background adb shell process)
                 ImGui::Spacing();
                 bool keepAwake = m_keepAwake;
-                if (ImGui::Checkbox("Keep Awake##devbar", &keepAwake)) {
+                if (ui::checkbox("Keep Awake##devbar", &keepAwake)) {
                     std::string serial = devSnap[selSnap].serial;
                     std::string adbPath = m_device.getAdbPath();
                     if (keepAwake && !m_keepAwake) {
@@ -4023,11 +4083,15 @@ void App::renderPanel(FilePanel& panel, PanelSide side) {
     renderPaneNavigation(panel);
 
     // Keep search, refresh and folder shortcuts on consistent baselines.
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,ImVec2(9*ui::scale(),7*ui::scale()));
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,ImVec2(32*ui::scale(),7*ui::scale()));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding,9*ui::scale());
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x-32*ui::scale());
+    const ImVec2 filterPosition=ImGui::GetCursorScreenPos();
     ImGui::InputTextWithHint(("##Filter" + std::string(label)).c_str(),
         "Filter this folder, e.g. *.mp4", panel.searchFilter, sizeof(panel.searchFilter));
-    ImGui::PopStyleVar();
+    ui::icon(ui::Icon::Search,ImVec2(filterPosition.x+10*ui::scale(),filterPosition.y+(ImGui::GetItemRectSize().y-15*ui::scale())*0.5f),
+        15*ui::scale(),ImGui::GetColorU32(ImGuiCol_TextDisabled));
+    ImGui::PopStyleVar(2);
     ImGui::SameLine(0,4*ui::scale());
     if(ui::button("##RefreshFolder",ui::Icon::Refresh,ui::Appearance::Quiet,ImVec2(28*ui::scale(),28*ui::scale()),"Refresh folder"))panel.needsRefresh=true;
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(0,0));
@@ -4176,6 +4240,7 @@ void App::renderPanel(FilePanel& panel, PanelSide side) {
             if(icon=="[K]")glyph=ui::Icon::Apps;
             if(icon=="[Z]")glyph=ui::Icon::Archive;
             ImVec2 iconPosition = ImGui::GetCursorScreenPos();
+            iconPosition.x += 6*ui::scale();
             iconPosition.y += (ImGui::GetTextLineHeight()-16*ui::scale())*0.5f;
             std::string compareTag;
             if (contentState == CompareContentState::SizeMismatch) compareTag = " [size diff]";
@@ -4184,9 +4249,9 @@ void App::renderPanel(FilePanel& panel, PanelSide side) {
             else if (contentState == CompareContentState::HashMismatch) compareTag = " [hash diff]";
             else if (contentState == CompareContentState::HashError) compareTag = " [hash error]";
             std::string sid = "##File" + std::to_string(i);
-            float nameWidth = ImGui::GetContentRegionAvail().x;
+            float nameWidth = ImGui::GetContentRegionAvail().x - 6*ui::scale();
             ImVec2 textPosition = ImGui::GetCursorScreenPos();
-            textPosition.x += 24*ui::scale();
+            textPosition.x += 30*ui::scale();
 
             bool pushedTextColor = true;
             if (isDir) ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_Text));
@@ -4197,11 +4262,21 @@ void App::renderPanel(FilePanel& panel, PanelSide side) {
             else if (contentState == CompareContentState::HashPending) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.78f,0.78f,0.84f,1));
             else if (compareHighlight) ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f,0.86f,0.42f,1));
             else pushedTextColor = false;
-            if (isSel) ImGui::PushStyleColor(ImGuiCol_Header, ImGui::GetStyleColorVec4(ImGuiCol_Header));
+            if (isSel) {
+                ImVec4 selection = ImGui::GetStyleColorVec4(ImGuiCol_CheckMark);
+                selection.w = m_resolvedLightTheme ? 0.24f : 0.17f;
+                ImGui::PushStyleColor(ImGuiCol_Header, selection);
+            }
             ImGui::PushStyleColor(ImGuiCol_HeaderHovered, ImVec4(0, 0, 0, 0));
 
             ImGuiSelectableFlags sf = ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowDoubleClick;
-            if (ImGui::Selectable(sid.c_str(), isSel, sf)) {
+            const bool rowClicked = ImGui::Selectable(sid.c_str(), isSel, sf);
+            if (isSel) {
+                const ImVec2 barMin = ImGui::GetItemRectMin(), barMax = ImGui::GetItemRectMax();
+                ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(barMin.x + 1*ui::scale(), barMin.y + 3*ui::scale()),
+                    ImVec2(barMin.x + 4*ui::scale(), barMax.y - 3*ui::scale()), ImGui::GetColorU32(ImGuiCol_CheckMark), 2*ui::scale());
+            }
+            if (rowClicked) {
                 ImGuiIO& io = ImGui::GetIO();
                 if (io.KeyCtrl) { if (isSel) panel.selectedIndices.erase(i); else panel.selectedIndices.insert(i); }
                 else if (io.KeyShift && panel.focusedIndex >= 0) {
@@ -4316,7 +4391,14 @@ void App::renderPanel(FilePanel& panel, PanelSide side) {
                 ImGui::EndDragDropSource();
             }
 
-            ImU32 glyphColor = ImGui::GetColorU32(isDir ? (m_resolvedLightTheme ? ImVec4(0.59f,0.41f,0.07f,1) : ImVec4(0.91f,0.73f,0.45f,1)) : ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            ImVec4 glyphTint = m_resolvedLightTheme ? ImVec4(0.32f,0.45f,0.66f,1) : ImVec4(0.56f,0.71f,0.91f,1);
+            if (isDir) glyphTint = m_resolvedLightTheme ? ImVec4(0.72f,0.50f,0.05f,1) : ImVec4(0.96f,0.77f,0.32f,1);
+            else if (glyph == ui::Icon::Image) glyphTint = m_resolvedLightTheme ? ImVec4(0.05f,0.55f,0.40f,1) : ImVec4(0.43f,0.91f,0.72f,1);
+            else if (glyph == ui::Icon::Video) glyphTint = m_resolvedLightTheme ? ImVec4(0.75f,0.20f,0.45f,1) : ImVec4(0.98f,0.56f,0.77f,1);
+            else if (glyph == ui::Icon::Music) glyphTint = m_resolvedLightTheme ? ImVec4(0.45f,0.30f,0.80f,1) : ImVec4(0.77f,0.71f,0.99f,1);
+            else if (glyph == ui::Icon::Apps) glyphTint = m_resolvedLightTheme ? ImVec4(0.10f,0.55f,0.25f,1) : ImVec4(0.53f,0.94f,0.60f,1);
+            else if (glyph == ui::Icon::Archive) glyphTint = m_resolvedLightTheme ? ImVec4(0.70f,0.40f,0.10f,1) : ImVec4(0.99f,0.73f,0.45f,1);
+            ImU32 glyphColor = ImGui::GetColorU32(glyphTint);
             ui::icon(glyph,iconPosition,16*ui::scale(),glyphColor);
             ui::drawTextClipped(textPosition,name+compareTag,nameWidth-24*ui::scale(),ImGui::GetColorU32(ImGuiCol_Text));
             if (isSel) ImGui::PopStyleColor(); // header
@@ -4361,6 +4443,8 @@ void App::renderPanel(FilePanel& panel, PanelSide side) {
             m_lastFocusedPanel = &panel;
             ImGui::OpenPopup("##BgContextMenu");
         }
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10*ui::scale(), 10*ui::scale()));
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10*ui::scale(), 9*ui::scale()));
         if (ImGui::BeginPopup("##BgContextMenu")) {
             if (m_contextPanel == &panel) {
                 if (ImGui::MenuItem("New Folder...")) {
@@ -4376,6 +4460,7 @@ void App::renderPanel(FilePanel& panel, PanelSide side) {
             }
             ImGui::EndPopup();
         }
+        ImGui::PopStyleVar(2);
 
         ImGui::EndTable();
 
@@ -4385,12 +4470,14 @@ void App::renderPanel(FilePanel& panel, PanelSide side) {
         const float hoverEase = hoverProgress * hoverProgress * (3.0f - 2.0f * hoverProgress);
         ImDrawList* hoverDraw = ImGui::GetWindowDrawList();
         if (panel.hoveredEntryIndex != -1) {
-            hoverDraw->AddRectFilled(panel.hoveredRowMin, panel.hoveredRowMax,
-                IM_COL32(67, 132, 220, (int)(44.0f * hoverEase)));
+            ImVec4 hoverTint = ImGui::GetStyleColorVec4(ImGuiCol_CheckMark);
+            hoverTint.w = 0.08f * hoverEase;
+            hoverDraw->AddRectFilled(panel.hoveredRowMin, panel.hoveredRowMax, ImGui::GetColorU32(hoverTint), 6*ui::scale());
         }
         if (hoverProgress < 1.0f && panel.previousHoveredRowMax.y > panel.previousHoveredRowMin.y) {
-            hoverDraw->AddRectFilled(panel.previousHoveredRowMin, panel.previousHoveredRowMax,
-                IM_COL32(67, 132, 220, (int)(44.0f * (1.0f - hoverEase))));
+            ImVec4 fadeTint = ImGui::GetStyleColorVec4(ImGuiCol_CheckMark);
+            fadeTint.w = 0.08f * (1.0f - hoverEase);
+            hoverDraw->AddRectFilled(panel.previousHoveredRowMin, panel.previousHoveredRowMax, ImGui::GetColorU32(fadeTint), 6*ui::scale());
         }
 
         // --- Rubber-band (lasso) selection ---
@@ -4590,7 +4677,7 @@ void App::renderTransferAttention() {
             ImGui::PopStyleVar();
 
             ImGui::TextWrapped("Replace overwrites the destination file. Skip keeps the existing file.");
-            ImGui::Checkbox("Apply to remaining conflicts", &m_transferAttentionApplyAll);
+            ui::checkbox("Apply to remaining conflicts", &m_transferAttentionApplyAll);
             ImGui::Spacing();
             const float buttonWidth = (ImGui::GetContentRegionAvail().x - 12 * s) * 0.5f;
             ConflictAction action = ConflictAction::None;
@@ -5303,10 +5390,14 @@ void App::renderAppsPanel(FilePanel& panel, PanelSide side) {
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,ImVec2(10*s,9*s));
     ImGui::SetNextItemWidth(140*s);
     const char* appTypeLabels[]={"All apps","User apps","System apps"};
-    ImGui::Combo("##AppTypeFilter",&panel.appTypeFilter,appTypeLabels,3);
+    ui::combo("##AppTypeFilter",&panel.appTypeFilter,appTypeLabels,3);
     ImGui::SameLine(0,8*s);
+    ImGui::PopStyleVar();
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,ImVec2(34*s,9*s));
     ImGui::SetNextItemWidth(-1);
+    const ImVec2 appSearchPos=ImGui::GetCursorScreenPos();
     ImGui::InputTextWithHint("##AppsSearch","Search by app name or package",panel.searchFilter,sizeof(panel.searchFilter));
+    ui::icon(ui::Icon::Search,ImVec2(appSearchPos.x+11*s,appSearchPos.y+(ImGui::GetItemRectSize().y-15*s)*0.5f),15*s,ImGui::GetColorU32(ImGuiCol_TextDisabled));
     ImGui::PopStyleVar();
     if (m_appUninstallActive && m_appUninstallPanel == &panel) {
         ImVec2 available = ImGui::GetContentRegionAvail();
@@ -5402,9 +5493,18 @@ void App::renderAppsPanel(FilePanel& panel, PanelSide side) {
     if(ui::button("Clear selection",ui::Icon::Close,ui::Appearance::Quiet,ImVec2(140*s,28*s)))panel.selectedIndices.clear();
     ImGui::EndDisabled();
     ImGui::SameLine(0,16*s);
-    ui::textClipped(panel.refreshInProgress?"Loading apps...":std::to_string(visibleAppIndices.size())+" apps / "+
-        std::to_string(panel.selectedIndices.size())+" selected",ImGui::GetContentRegionAvail().x,ImGui::GetColorU32(ImGuiCol_TextDisabled),28*s);
-    ImGui::Separator();
+    {
+        const std::string summary=panel.refreshInProgress?"Loading apps...":std::to_string(visibleAppIndices.size())+" apps, "+
+            std::to_string(panel.selectedIndices.size())+" selected";
+        const ImVec2 chip=ImGui::GetCursorScreenPos();
+        const ImVec2 textSize=ImGui::CalcTextSize(summary.c_str());
+        const ImVec2 chipSize(textSize.x+24*s,26*s);
+        ImDrawList* draw=ImGui::GetWindowDrawList();
+        draw->AddRectFilled(ImVec2(chip.x,chip.y+1*s),ImVec2(chip.x+chipSize.x,chip.y+1*s+chipSize.y),ImGui::GetColorU32(ImGuiCol_Button),chipSize.y*0.5f);
+        draw->AddText(ImVec2(chip.x+12*s,chip.y+1*s+(chipSize.y-textSize.y)*0.5f),ImGui::GetColorU32(ImGuiCol_TextDisabled),summary.c_str());
+        ImGui::Dummy(ImVec2(chipSize.x,28*s));
+    }
+    ImGui::Spacing();
 
     ImGuiTableFlags tf = ImGuiTableFlags_Resizable | ImGuiTableFlags_RowBg |
         ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_Sortable;
@@ -5438,15 +5538,45 @@ void App::renderAppsPanel(FilePanel& panel, PanelSide side) {
             }
         }
 
+        ui::PanelStyle theme(m_resolvedLightTheme);
+        ImVec4 selectionTint = ImGui::GetStyleColorVec4(ImGuiCol_CheckMark);
+        selectionTint.w = m_resolvedLightTheme ? 0.22f : 0.15f;
+        ImGui::PushStyleColor(ImGuiCol_Header, selectionTint);
+        const float rowHeight = std::max(32*s, ImGui::GetTextLineHeight()+12*s);
         for (int i : visibleAppIndices) {
             const auto& app = panel.appEntries[i];
 
             bool selected = panel.selectedIndices.count(i) > 0;
-            ImGui::TableNextRow();
+            ImGui::TableNextRow(0, rowHeight);
             ImGui::TableNextColumn();
             std::string displayName = app.appName.empty() ? app.packageName : app.appName;
-            std::string rowId = displayName + "##app" + std::to_string(i);
-            if (ImGui::Selectable(rowId.c_str(), selected, ImGuiSelectableFlags_SpanAllColumns)) {
+            std::string rowId = "##app" + std::to_string(i);
+            const ImVec2 rowStart = ImGui::GetCursorScreenPos();
+            const float nameWidth = ImGui::GetContentRegionAvail().x;
+            const bool rowClicked = ImGui::Selectable(rowId.c_str(), selected, ImGuiSelectableFlags_SpanAllColumns, ImVec2(0, rowHeight - 4*s));
+            {
+                ImDrawList* draw = ImGui::GetWindowDrawList();
+                if (selected) {
+                    const ImVec2 a = ImGui::GetItemRectMin(), b = ImGui::GetItemRectMax();
+                    draw->AddRectFilled(ImVec2(a.x, a.y + 2*s), ImVec2(a.x + 3*s, b.y - 2*s), ImGui::GetColorU32(ImGuiCol_CheckMark), 2*s);
+                }
+                const ImVec4 tints[] = { theme.blue, theme.green, theme.gold, ui::rgb(196, 181, 253), ui::rgb(249, 168, 212) };
+                size_t hash = 0;
+                for (char c : app.packageName) hash = hash * 31 + (unsigned char)c;
+                const ImVec4 tint = tints[hash % 5];
+                ImVec4 tileFill = tint; tileFill.w = 0.16f;
+                const float tile = 24*s;
+                const ImVec2 tilePos(rowStart.x + 6*s, rowStart.y + (rowHeight - 4*s - tile) * 0.5f);
+                draw->AddRectFilled(tilePos, ImVec2(tilePos.x + tile, tilePos.y + tile), theme.color(tileFill), 7*s);
+                char initial[2] = { displayName.empty() ? '?' : (char)std::toupper((unsigned char)displayName[0]), 0 };
+                ImFont* initialFont = ui::semiboldFont ? ui::semiboldFont : ImGui::GetFont();
+                const ImVec2 initialSize = initialFont->CalcTextSizeA(13*s, FLT_MAX, 0, initial);
+                draw->AddText(initialFont, 13*s, ImVec2(tilePos.x + (tile - initialSize.x) * 0.5f, tilePos.y + (tile - initialSize.y) * 0.5f),
+                    theme.color(tint), initial);
+                ui::drawTextClipped(ImVec2(tilePos.x + tile + 10*s, rowStart.y + (rowHeight - 4*s - ImGui::GetTextLineHeight()) * 0.5f),
+                    displayName, nameWidth - tile - 22*s, ImGui::GetColorU32(ImGuiCol_Text));
+            }
+            if (rowClicked) {
                 ImGuiIO& io = ImGui::GetIO();
                 auto anchorIt = std::find(visibleAppIndices.begin(), visibleAppIndices.end(), panel.focusedIndex);
                 auto clickedIt = std::find(visibleAppIndices.begin(), visibleAppIndices.end(), i);
@@ -5481,15 +5611,39 @@ void App::renderAppsPanel(FilePanel& panel, PanelSide side) {
                 ImGui::EndDisabled();
                 ImGui::EndPopup();
             }
+            const float textOffset = (rowHeight - 4*s - ImGui::GetTextLineHeight()) * 0.5f;
             ImGui::TableNextColumn();
-            ImGui::TextUnformatted(app.packageName.c_str());
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + textOffset);
+            ui::textClipped(app.packageName, ImGui::GetContentRegionAvail().x, ImGui::GetColorU32(ImGuiCol_TextDisabled));
             ImGui::TableNextColumn();
-            ImGui::TextColored(app.isSystem ? ImVec4(1.0f, 0.72f, 0.34f, 1) : ImVec4(0.55f, 1.0f, 0.65f, 1),
-                "%s", app.isSystem ? "System" : "User");
+            {
+                const ImVec2 cell = ImGui::GetCursorScreenPos();
+                const float pillWidth = std::min(ImGui::GetContentRegionAvail().x, 64*s);
+                theme.pill(ImVec2(cell.x + (ImGui::GetContentRegionAvail().x - pillWidth) * 0.5f, cell.y + (rowHeight - 4*s - 22*s) * 0.5f),
+                    ImVec2(pillWidth, 22*s), ui::Icon::None, app.isSystem ? "System" : "User", app.isSystem ? theme.gold : theme.blue);
+                ImGui::Dummy(ImVec2(pillWidth, rowHeight - 4*s));
+            }
             ImGui::TableNextColumn();
-            ImGui::TextDisabled("%s", app.apkPath.c_str());
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + textOffset);
+            ui::textClipped(app.apkPath, ImGui::GetContentRegionAvail().x, ImGui::GetColorU32(ImGuiCol_TextDisabled));
         }
+        ImGui::PopStyleColor();
         ImGui::EndTable();
+        if (visibleAppIndices.empty()) {
+            const ImVec2 tableMin = ImGui::GetItemRectMin();
+            const ImVec2 tableMax = ImGui::GetItemRectMax();
+            const char* title = panel.refreshInProgress ? "Loading installed apps..." : "No apps match your filter";
+            const char* detail = panel.refreshInProgress ? "Reading the app list from your phone." : "Try another app name, package or type.";
+            ImFont* titleFont = ui::semiboldFont ? ui::semiboldFont : ImGui::GetFont();
+            const ImVec2 titleSize = titleFont->CalcTextSizeA(ImGui::GetFontSize() * 1.15f, FLT_MAX, 0, title);
+            const ImVec2 detailSize = ImGui::CalcTextSize(detail);
+            const float centerX = (tableMin.x + tableMax.x) * 0.5f;
+            const float y = tableMin.y + std::min(180*s, (tableMax.y - tableMin.y) * 0.35f);
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+            theme.tile(ui::Icon::Apps, ImVec2(centerX - 24*s, y - 64*s), 48*s / theme.s, ImGui::GetStyleColorVec4(ImGuiCol_CheckMark));
+            draw->AddText(titleFont, ImGui::GetFontSize() * 1.15f, ImVec2(centerX - titleSize.x * 0.5f, y), theme.color(theme.text), title);
+            draw->AddText(ImVec2(centerX - detailSize.x * 0.5f, y + titleSize.y + 8*s), theme.color(theme.muted), detail);
+        }
     }
 }
 
@@ -7323,6 +7477,11 @@ void App::renderBackupManagerWindow() {
     ImGui::PushStyleColor(ImGuiCol_TableHeaderBg, theme.raised);
     ImGui::PushStyleColor(ImGuiCol_TableRowBg, theme.background);
     ImGui::PushStyleColor(ImGuiCol_TableRowBgAlt, theme.surface);
+    {
+        ImVec4 selection = ImGui::GetStyleColorVec4(ImGuiCol_CheckMark);
+        selection.w = m_resolvedLightTheme ? 0.22f : 0.15f;
+        ImGui::PushStyleColor(ImGuiCol_Header, selection);
+    }
 
     struct BackupOption { const char* label; bool* value; bool rootOnly = false; };
     BackupOption options[] = {
@@ -7336,7 +7495,7 @@ void App::renderBackupManagerWindow() {
     float optionX = 0;
     int optionRows = 1;
     for (const auto& option : options) {
-        float w = ImGui::CalcTextSize(option.label).x + ImGui::GetFrameHeight() + 26 * s;
+        float w = ImGui::CalcTextSize(option.label).x + ImGui::GetFrameHeight() + 34 * s;
         if (optionX > 0 && optionX + w > toolbarWidth) { ++optionRows; optionX = 0; }
         optionX += w;
     }
@@ -7347,7 +7506,7 @@ void App::renderBackupManagerWindow() {
         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     ImVec2 toolbar = ImGui::GetCursorScreenPos();
     float width = ImGui::GetContentRegionAvail().x;
-    theme.tile(ui::Icon::Backup, toolbar, 32);
+    theme.tile(ui::Icon::Backup, toolbar, 32, theme.blue);
     theme.label(ImVec2(toolbar.x + 46 * s, toolbar.y + 4 * s), "Backup Manager", 202 * s, theme.text, 20, true);
     if (theme.button("##BackupToFiles", "Back to File Manager", ui::Icon::Back,
         ImVec2(toolbar.x + 253 * s, toolbar.y), ImVec2(188 * s, 32 * s), theme.muted)) m_showBackupManager = false;
@@ -7366,7 +7525,7 @@ void App::renderBackupManagerWindow() {
     }
     float deviceY = toolbar.y + titleRowH;
     ImGui::GetWindowDrawList()->AddLine(ImVec2(toolbar.x, deviceY - 6 * s), ImVec2(toolbar.x + width, deviceY - 6 * s), theme.color(theme.border));
-    theme.label(ImVec2(toolbar.x, deviceY + 9 * s), "Device", 48 * s, theme.muted, 13);
+    theme.label(ImVec2(toolbar.x, deviceY + (32 * s - 13 * s) * 0.5f - 1 * s), "Device", 48 * s, theme.muted, 13);
     auto slotLabel = [&](int slot) -> std::string {
         if (!deviceSession(slot).connected) return "No device";
         auto it = m_deviceDisplayNames.find(deviceSession(slot).serial);
@@ -7374,7 +7533,10 @@ void App::renderBackupManagerWindow() {
     };
     ImGui::SetCursorScreenPos(ImVec2(toolbar.x + 56 * s, deviceY));
     ImGui::SetNextItemWidth(240 * s);
-    if (ImGui::BeginCombo("##BackupDevice", slotLabel(m_backupManagerSlot).c_str())) {
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(12 * s, std::max(2.0f, (32 * s - ImGui::GetFontSize()) * 0.5f)));
+    const bool deviceComboOpen = ui::beginCombo("##BackupDevice", slotLabel(m_backupManagerSlot).c_str());
+    ImGui::PopStyleVar();
+    if (deviceComboOpen) {
         for (int slot = 0; slot < deviceSessionCount(); ++slot) {
             ImGui::BeginDisabled(!deviceSession(slot).connected);
             bool selected = m_backupManagerSlot == slot;
@@ -7412,11 +7574,20 @@ void App::renderBackupManagerWindow() {
     ImGui::GetWindowDrawList()->AddLine(ImVec2(toolbar.x, optionsY - 6 * s), ImVec2(toolbar.x + width, optionsY - 6 * s), theme.color(theme.border));
     optionX = 0;
     for (auto& option : options) {
-        float w = ImGui::CalcTextSize(option.label).x + ImGui::GetFrameHeight() + 26 * s;
-        if (optionX > 0 && optionX + w > width) { optionsY += ImGui::GetFrameHeight() + 8 * s; optionX = 0; }
-        ImGui::SetCursorScreenPos(ImVec2(toolbar.x + optionX, optionsY));
+        float w = ImGui::CalcTextSize(option.label).x + ImGui::GetFrameHeight() + 34 * s;
+        if (optionX > 0 && optionX + w > width) { optionsY += ImGui::GetFrameHeight() + 10 * s; optionX = 0; }
+        {
+            const ImVec2 chipMin(toolbar.x + optionX, optionsY - 2 * s);
+            const ImVec2 chipMax(toolbar.x + optionX + w - 10 * s, optionsY + ImGui::GetFrameHeight() + 2 * s);
+            const bool on = *option.value && !(option.rootOnly && !backupRootEnabled);
+            ImVec4 fill = ImGui::GetStyleColorVec4(ImGuiCol_CheckMark); fill.w = on ? 0.09f : 0.0f;
+            ImVec4 edge = on ? ImGui::GetStyleColorVec4(ImGuiCol_CheckMark) : theme.border; edge.w = on ? 0.35f : 0.8f;
+            ImGui::GetWindowDrawList()->AddRectFilled(chipMin, chipMax, theme.color(fill), (chipMax.y - chipMin.y) * 0.5f);
+            ImGui::GetWindowDrawList()->AddRect(chipMin, chipMax, theme.color(edge), (chipMax.y - chipMin.y) * 0.5f);
+        }
+        ImGui::SetCursorScreenPos(ImVec2(toolbar.x + optionX + 6 * s, optionsY));
         ImGui::BeginDisabled(option.rootOnly && !backupRootEnabled);
-        if (ImGui::Checkbox(option.label, option.value) && option.value == &m_backupShowSystemApps) {
+        if (ui::checkbox(option.label, option.value) && option.value == &m_backupShowSystemApps) {
             m_backupManagerAppPage = 0;
             if (!m_backupShowSystemApps)
                 for (auto& row : m_backupManagerApps) if (row.app.isSystem) row.selected = false;
@@ -7581,12 +7752,25 @@ void App::renderBackupManagerWindow() {
         ImGui::PopStyleColor(4);
         return clicked;
     };
-    auto paneHeading = [&](const std::string& title, const char* id, const char* hint, char* search, size_t capacity) {
+    auto paneHeading = [&](const std::string& title, const char* id, const char* hint, char* search, size_t capacity, int count = -1) {
         ImVec2 p = ImGui::GetCursorScreenPos();
         float w = ImGui::GetContentRegionAvail().x;
         bool stacked = w < 470 * s;
-        float titleWidth = std::min(230 * s, w * .46f);
+        float titleWidth = std::min(250 * s, w * .46f);
         theme.label(ImVec2(p.x + 2 * s, p.y + 8.5f * s), title, stacked ? w : titleWidth, theme.text, 19, true);
+        if (count >= 0) {
+            ImFont* titleFont = ui::semiboldFont ? ui::semiboldFont : ImGui::GetFont();
+            const float titleSpan = titleFont->CalcTextSizeA(19 * s, FLT_MAX, 0, title.c_str()).x;
+            const std::string countText = std::to_string(count);
+            const ImVec2 countSize = ImGui::CalcTextSize(countText.c_str());
+            const ImVec2 badgeMin(p.x + 2 * s + titleSpan + 10 * s, p.y + 8.5f * s + (19 * s - 22 * s) * 0.5f + 1 * s);
+            const ImVec2 badgeMax(badgeMin.x + countSize.x + 18 * s, badgeMin.y + 22 * s);
+            if (badgeMax.x < p.x + (stacked ? w : titleWidth)) {
+                ImGui::GetWindowDrawList()->AddRectFilled(badgeMin, badgeMax, theme.color(theme.raised), 11 * s);
+                ImGui::GetWindowDrawList()->AddText(ImVec2(badgeMin.x + 9 * s, badgeMin.y + (22 * s - countSize.y) * 0.5f),
+                    theme.color(theme.muted), countText.c_str());
+            }
+        }
         bool changed = theme.search(id, hint, search, capacity,
             ImVec2(stacked ? p.x : p.x + titleWidth, p.y + (stacked ? 36 * s : 0)), stacked ? w : w - titleWidth);
         ImGui::SetCursorScreenPos(ImVec2(p.x, p.y + (stacked ? 80 : 44) * s));
@@ -7602,7 +7786,7 @@ void App::renderBackupManagerWindow() {
     auto selectionCheckbox = [&](const char* id, bool& selected) {
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
         ImGui::SetCursorPosY(ImGui::GetCursorPosY() + 3 * s);
-        bool changed = ImGui::Checkbox(id, &selected);
+        bool changed = ui::checkbox(id, &selected);
         ImGui::PopStyleVar();
         return changed;
     };
@@ -7630,8 +7814,8 @@ void App::renderBackupManagerWindow() {
     ImGui::BeginChild("##BackupAppsPane", ImVec2(columnW, bodyH), ImGuiChildFlags_Borders, ImGuiWindowFlags_NoScrollbar);
     int appCount = 0;
     for (const auto& row : m_backupManagerApps) if (m_backupShowSystemApps || !row.app.isSystem) ++appCount;
-    if (paneHeading("Installed Apps (" + std::to_string(appCount) + ")", "##BackupAppSearch", "Search apps...",
-        m_backupManagerSearch, sizeof(m_backupManagerSearch))) {
+    if (paneHeading("Installed Apps", "##BackupAppSearch", "Search apps...",
+        m_backupManagerSearch, sizeof(m_backupManagerSearch), appCount)) {
         m_backupManagerAppPage = 0;
         filter = m_backupManagerSearch;
         std::transform(filter.begin(), filter.end(), filter.begin(), [](unsigned char c) { return (char)std::tolower(c); });
@@ -7696,8 +7880,19 @@ void App::renderBackupManagerWindow() {
                 ImGui::EndPopup();
             }
             std::string name = row.app.appName.empty() ? row.app.packageName : row.app.appName;
-            theme.box(p, ImVec2(22 * s, 22 * s), theme.raised, theme.surface, theme.border, 5);
-            ui::icon(ui::Icon::Apps, ImVec2(p.x + 4 * s, p.y + 4 * s), 14 * s, theme.color(theme.blue));
+            {
+                const ImVec4 tints[] = { theme.blue, theme.green, theme.gold, ui::rgb(196, 181, 253), ui::rgb(249, 168, 212) };
+                size_t hash = 0;
+                for (char c : row.app.packageName) hash = hash * 31 + (unsigned char)c;
+                const ImVec4 tint = tints[hash % 5];
+                ImVec4 tileFill = tint; tileFill.w = 0.16f;
+                ImGui::GetWindowDrawList()->AddRectFilled(p, ImVec2(p.x + 22 * s, p.y + 22 * s), theme.color(tileFill), 6 * s);
+                char initial[2] = { name.empty() ? '?' : (char)std::toupper((unsigned char)name[0]), 0 };
+                ImFont* initialFont = ui::semiboldFont ? ui::semiboldFont : ImGui::GetFont();
+                const ImVec2 initialSize = initialFont->CalcTextSizeA(12 * s, FLT_MAX, 0, initial);
+                ImGui::GetWindowDrawList()->AddText(initialFont, 12 * s,
+                    ImVec2(p.x + (22 * s - initialSize.x) * 0.5f, p.y + (22 * s - initialSize.y) * 0.5f), theme.color(tint), initial);
+            }
             theme.label(ImVec2(p.x + 31 * s, p.y + 3 * s), name, nameW - 31 * s, theme.text, 13);
             if (ImGui::IsItemHovered() && ImGui::CalcTextSize(name.c_str()).x > nameW - 31 * s) ImGui::SetTooltip("%s", name.c_str());
             ImGui::TableSetColumnIndex(2);
@@ -7705,12 +7900,11 @@ void App::renderBackupManagerWindow() {
             ImGui::TableSetColumnIndex(3);
             p = ImGui::GetCursorScreenPos();
             ImVec4 ink = row.app.isSystem ? theme.gold : theme.blue;
-            ImVec4 fill = ink; fill.w = .12f;
-            ImGui::GetWindowDrawList()->AddRectFilled(p, ImVec2(p.x + 62 * s, p.y + 22 * s), theme.color(fill), 11 * s);
             const char* typeLabel = row.app.isSystem ? "System" : "User";
-            float typeWidth = ImGui::GetFont()->CalcTextSizeA(12 * s, FLT_MAX, 0, typeLabel).x;
-            theme.label(ImVec2(p.x + (62 * s - typeWidth) * .5f, p.y + 5 * s), typeLabel, typeWidth + s, ink, 12);
-            ImGui::Dummy(ImVec2(62 * s, 22 * s));
+            const float pillWidth = std::min(ImGui::GetContentRegionAvail().x, 62 * s);
+            theme.pill(ImVec2(p.x + (ImGui::GetContentRegionAvail().x - pillWidth) * 0.5f, p.y), ImVec2(pillWidth, 22 * s),
+                ui::Icon::None, typeLabel, ink);
+            ImGui::Dummy(ImVec2(pillWidth, 22 * s));
             ImGui::TableSetColumnIndex(4);
             cellText(row.app.apkPath, theme.muted);
             ImGui::TableSetColumnIndex(0);
@@ -7752,7 +7946,7 @@ void App::renderBackupManagerWindow() {
     ImGui::SetCursorScreenPos(ImVec2(pageSizeX, pagination.y));
     ImGui::SetNextItemWidth(104 * s);
     std::string pageSizeLabel = m_backupManagerAppsPerPage == 0 ? "All apps" : std::to_string(m_backupManagerAppsPerPage) + " / page";
-    if (ImGui::BeginCombo("##BackupPageSize", pageSizeLabel.c_str())) {
+    if (ui::beginCombo("##BackupPageSize", pageSizeLabel.c_str())) {
         for (int count : {15, 30, 50, 0}) {
             std::string label = count ? std::to_string(count) + " / page" : "All apps";
             if (ImGui::Selectable(label.c_str(), count == m_backupManagerAppsPerPage)) {
@@ -8254,7 +8448,7 @@ void App::renderBackupManagerWindow() {
     ImGui::EndChild();
     ImGui::PopStyleColor();
     ImGui::PopStyleVar();
-    ImGui::PopStyleColor(7);
+    ImGui::PopStyleColor(8);
     ImGui::PopStyleVar(5);
 
 }
@@ -8285,40 +8479,236 @@ void App::openAndroidFile(FilePanel& panel, int index) {
     appendPathSeparator(remotePath, '/');
     remotePath += name;
 
+    if (m_openFile.active.load()) {
+        m_statusMessage = "Already opening a file. Wait for it to finish or cancel it first.";
+        m_statusTime = std::chrono::steady_clock::now();
+        return;
+    }
+    if (m_openFileThread.joinable()) m_openFileThread.join();
+
     m_statusMessage = "Opening: " + name + "...";
     m_statusTime = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> lock(m_openFile.mutex);
+        m_openFile.name = name;
+        m_openFile.detail.clear();
+        m_openFile.started = std::chrono::steady_clock::now();
+        m_openFile.finished = {};
+    }
+    m_openFile.bytes = 0;
+    m_openFile.total = panel.entrySize(index);
+    m_openFile.bytesPerSecond = 0.0;
+    m_openFile.etaSeconds = -1.0;
+    m_openFile.cancelRequested = false;
+    m_openFile.cancellable = false;
+    m_openFile.outcome = OpenFileRunning;
+    m_openFile.active = true;
+    m_openFileDismissed = false;
 
     int slot = panel.deviceSlot;
-    postAsync("Opening: " + name, [this, remotePath, name, slot]() {
+    m_openFileThread = std::thread([this, remotePath, name, slot]() {
         char tempBuf[MAX_PATH];
         GetTempPathA(MAX_PATH, tempBuf);
         std::string tempDir = std::string(tempBuf) + "FastEnough\\";
         CreateDirectoryA(tempDir.c_str(), nullptr);
-
         std::string localPath = tempDir + name;
         uint64_t outSize = 0;
 
+        // A dedicated connection keeps browsing responsive and lets the download be
+        // cancelled without dropping the main session.
+        DeviceClient& base = deviceForSlot(slot);
+        DeviceClient dedicated;
+        DeviceClient* client = &base;
+        {
+            const std::string host = base.connectedHost();
+            const int port = host == "127.0.0.1" ? base.localPort() : base.serverPort();
+            // This connection only borrows the running helper. Without this, destroying it
+            // would stop the helper and remove the port forward for the whole session.
+            dedicated.setOwnsServer(false);
+            dedicated.setAdbPath(base.getAdbPath());
+            dedicated.setServerPort(base.serverPort());
+            dedicated.setLocalPort(base.localPort());
+            if (!host.empty() && dedicated.connectTcp(host, port) && dedicated.verifyConnection()) {
+                client = &dedicated;
+                m_openFile.cancellable = true;
+            } else {
+                dedicated.disconnectTcp();
+                LOG_WARN("UI", "Opening over the main connection, cancel is unavailable");
+            }
+        }
+
+        TransferRateEstimator rate;
+        const bool cancellable = client == &dedicated;
+        auto progress = [&](uint64_t done, uint64_t total) {
+            m_openFile.bytes = done;
+            if (total) m_openFile.total = total;
+            const TransferRateSample sample = rate.update(done, total);
+            m_openFile.bytesPerSecond = sample.bytesPerSecond;
+            m_openFile.etaSeconds = sample.etaSeconds;
+            return !cancellable || !m_openFile.cancelRequested.load();
+        };
+
         LOG_INFO("UI", "Pulling to temp: " + remotePath + " -> " + localPath);
-        bool ok = deviceForSlot(slot).pullFile(remotePath, localPath, outSize, nullptr);
-        if (ok) {
+        const bool ok = client->pullFile(remotePath, localPath, outSize, progress);
+        const std::string pullError = client->lastError();
+        if (cancellable) dedicated.disconnectTcp();
+
+        int outcome = OpenFileFailed;
+        std::string detail;
+        if (cancellable && m_openFile.cancelRequested.load()) {
+            outcome = OpenFileCancelled;
+            std::error_code error;
+            std::filesystem::remove(toFsPath(localPath), error);
+            LOG_INFO("UI", "Open cancelled: " + remotePath);
+        } else if (ok) {
             LOG_INFO("UI", "Opening: " + localPath);
             const std::wstring wideLocalPath = toWide(localPath);
             HINSTANCE launchResult = ShellExecuteW(
                 nullptr, L"open", wideLocalPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
             if (reinterpret_cast<INT_PTR>(launchResult) > 32) {
-                m_statusMessage = "Opened: " + name;
+                outcome = OpenFileOpened;
             } else {
                 LOG_ERROR("UI", "Failed to launch file: " + localPath +
                     " (ShellExecute error " +
                     std::to_string(reinterpret_cast<INT_PTR>(launchResult)) + ")");
-                m_statusMessage = "Failed to open: " + name;
+                detail = "Windows has no app set up to open this file type.";
             }
         } else {
-            LOG_ERROR("UI", "Failed to pull file: " + remotePath);
-            m_statusMessage = "Failed to open: " + name;
+            LOG_ERROR("UI", "Failed to pull file: " + remotePath + ": " + pullError);
+            detail = pullError.empty() ? "The file could not be downloaded from the phone." : pullError;
         }
-        m_statusTime = std::chrono::steady_clock::now();
+        {
+            std::lock_guard<std::mutex> lock(m_openFile.mutex);
+            m_openFile.detail = detail;
+            m_openFile.finished = std::chrono::steady_clock::now();
+        }
+        m_openFile.outcome = outcome;
+        m_openFile.active = false;
     });
+}
+
+void App::renderOpenFileCard() {
+    const bool active = m_openFile.active.load();
+    const int outcome = m_openFile.outcome.load();
+    std::string name, detail;
+    std::chrono::steady_clock::time_point started, finished;
+    {
+        std::lock_guard<std::mutex> lock(m_openFile.mutex);
+        name = m_openFile.name;
+        detail = m_openFile.detail;
+        started = m_openFile.started;
+        finished = m_openFile.finished;
+    }
+    if (name.empty() || m_openFileDismissed) return;
+    const auto now = std::chrono::steady_clock::now();
+    float alpha = 1.0f;
+    if (active) {
+        // Skip the card for files that finish almost instantly.
+        if (now - started < std::chrono::milliseconds(150)) return;
+    } else {
+        const float shown = outcome == OpenFileFailed ? 6.0f : 2.2f;
+        const float since = (float)std::chrono::duration<double>(now - finished).count();
+        if (finished.time_since_epoch().count() == 0 || since > shown) return;
+        if (outcome == OpenFileOpened && std::chrono::duration<double>(finished - started).count() < 0.4) return;
+        alpha = std::clamp((shown - since) / 0.35f, 0.0f, 1.0f);
+    }
+
+    const float s = ui::scale();
+    ui::PanelStyle theme(m_resolvedLightTheme);
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const ImVec2 size(std::min(440 * s, viewport->WorkSize.x - 32 * s), 112 * s);
+    const float statusHeight = std::max(36 * s, ImGui::GetFontSize() + 18 * s);
+    ImGui::SetNextWindowPos(ImVec2(viewport->WorkPos.x + viewport->WorkSize.x - size.x - 20 * s,
+        viewport->WorkPos.y + viewport->WorkSize.y - statusHeight - size.y - 14 * s));
+    ImGui::SetNextWindowSize(size);
+    ImGui::SetNextWindowBgAlpha(0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_Alpha, alpha);
+    const ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
+    if (ImGui::Begin("##OpenFileCard", nullptr, flags)) {
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        const ImVec2 p = ImGui::GetWindowPos();
+        const ImVec4 accent = outcome == OpenFileFailed ? theme.red : outcome == OpenFileCancelled ? theme.muted :
+            outcome == OpenFileOpened ? theme.green : ImGui::GetStyleColorVec4(ImGuiCol_CheckMark);
+        ImVec4 shadow(0, 0, 0, m_resolvedLightTheme ? 0.12f : 0.40f);
+        draw->AddRectFilled(ImVec2(p.x + 4 * s, p.y + 8 * s), ImVec2(p.x + size.x + 2 * s, p.y + size.y + 10 * s), theme.color(shadow), 16 * s);
+        ImVec4 edge = accent; edge.w = 0.55f;
+        const ImVec4 body = ImGui::GetStyleColorVec4(ImGuiCol_PopupBg);
+        theme.box(p, size, ui::shade(body, m_resolvedLightTheme ? 0.0f : 0.05f), body, edge, 14);
+
+        const float pad = 16 * s;
+        const float tile = 40 * s;
+        const ui::Icon glyph = outcome == OpenFileOpened ? ui::Icon::Check : outcome == OpenFileFailed ? ui::Icon::Close :
+            outcome == OpenFileCancelled ? ui::Icon::Close : ui::Icon::Down;
+        theme.tile(glyph, ImVec2(p.x + pad, p.y + pad), tile / theme.s, accent);
+
+        const char* verb = outcome == OpenFileOpened ? "Opened" : outcome == OpenFileFailed ? "Could not open" :
+            outcome == OpenFileCancelled ? "Cancelled" : "Opening";
+        const bool showCancel = active && m_openFile.cancellable.load();
+        const float actionWidth = showCancel ? 92 * s : 30 * s;
+        const float textX = p.x + pad + tile + 14 * s;
+        const float textWidth = p.x + size.x - pad - actionWidth - 10 * s - textX;
+        theme.label(ImVec2(textX, p.y + pad + 1 * s), std::string(verb) + " " + name, textWidth, theme.text, 14, true);
+
+        const uint64_t done = m_openFile.bytes.load();
+        const uint64_t total = m_openFile.total.load();
+        std::string subtitle;
+        if (active) {
+            subtitle = total > 0 ? formatSize(done) + " of " + formatSize(total) : formatSize(done) + " downloaded";
+            const double speed = m_openFile.bytesPerSecond.load();
+            if (speed > 0) subtitle += "  |  " + formatSpeed(speed);
+            const double eta = m_openFile.etaSeconds.load();
+            if (eta > 0.5) subtitle += "  |  " + formatETA(eta) + " left";
+        } else if (outcome == OpenFileOpened) {
+            subtitle = "Opened with the default Windows app";
+        } else if (outcome == OpenFileCancelled) {
+            subtitle = "The download was stopped";
+        } else {
+            subtitle = detail;
+        }
+        theme.label(ImVec2(textX, p.y + pad + 24 * s), subtitle, textWidth, outcome == OpenFileFailed ? theme.red : theme.muted, 12);
+
+        // Progress track across the bottom of the card.
+        const ImVec2 trackPos(p.x + pad, p.y + size.y - pad - 6 * s);
+        const float trackWidth = size.x - pad * 2;
+        if (active && total == 0) {
+            draw->AddRectFilled(trackPos, ImVec2(trackPos.x + trackWidth, trackPos.y + 6 * s),
+                theme.color(m_resolvedLightTheme ? ui::rgb(222, 230, 241) : ui::rgb(24, 35, 51)), 3 * s);
+            const float sweep = std::fmod((float)ImGui::GetTime() * 0.8f, 1.0f);
+            const float segment = trackWidth * 0.28f;
+            const float x0 = trackPos.x + (trackWidth + segment) * sweep - segment;
+            draw->PushClipRect(trackPos, ImVec2(trackPos.x + trackWidth, trackPos.y + 6 * s), true);
+            draw->AddRectFilled(ImVec2(x0, trackPos.y), ImVec2(x0 + segment, trackPos.y + 6 * s), theme.color(accent), 3 * s);
+            draw->PopClipRect();
+        } else {
+            const float fraction = active ? (total > 0 ? (float)((double)done / (double)total) : 0.0f) : 1.0f;
+            const ImVec4 to = active ? m_theme.gradientSecondary : accent;
+            ui::progressTrack(trackPos, trackWidth, 6 * s, fraction, accent, to);
+        }
+        if (active && total > 0) {
+            char percent[16];
+            snprintf(percent, sizeof(percent), "%.0f%%", 100.0 * (double)done / (double)total);
+            const float percentWidth = ImGui::CalcTextSize(percent).x;
+            draw->AddText(ImVec2(p.x + size.x - pad - percentWidth, trackPos.y - ImGui::GetTextLineHeight() - 6 * s),
+                theme.color(theme.text), percent);
+        }
+
+        ImGui::SetCursorScreenPos(ImVec2(p.x + size.x - pad - actionWidth, p.y + pad + 4 * s));
+        if (showCancel) {
+            ImGui::BeginDisabled(m_openFile.cancelRequested.load());
+            if (ui::button(m_openFile.cancelRequested.load() ? "Stopping##OpenFileCancel" : "Cancel##OpenFileCancel",
+                    ui::Icon::None, ui::Appearance::Secondary, ImVec2(actionWidth, 30 * s)))
+                m_openFile.cancelRequested = true;
+            ImGui::EndDisabled();
+        } else if (!active) {
+            if (ui::button("##OpenFileDismiss", ui::Icon::Close, ui::Appearance::Quiet, ImVec2(30 * s, 30 * s), "Dismiss"))
+                m_openFileDismissed = true;
+        }
+    }
+    ImGui::End();
+    ImGui::PopStyleVar(3);
 }
 
 void App::renderCopyMoveDialog() {
@@ -8981,7 +9371,7 @@ void App::renderApkInstallDialog() {
             ImGui::SetNextItemWidth(-FLT_MIN);
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10 * s, 8 * s));
             std::string preview = deviceLabel(online[m_pendingApkDeviceIndex]);
-            if (ImGui::BeginCombo("##ApkDevice", preview.c_str())) {
+            if (ui::beginCombo("##ApkDevice", preview.c_str())) {
                 for (int i = 0; i < (int)online.size(); i++) {
                     std::string label = deviceLabel(online[i]);
                     bool selected = i == m_pendingApkDeviceIndex;
@@ -8995,8 +9385,8 @@ void App::renderApkInstallDialog() {
         }
 
         ui::sectionLabel("OPTIONS");
-        ImGui::Checkbox("Grant runtime permissions after install", &m_apkInstallGrantPermissions);
-        ImGui::Checkbox("Allow version downgrade", &m_apkInstallAllowDowngrade);
+        ui::checkbox("Grant runtime permissions after install", &m_apkInstallGrantPermissions);
+        ui::checkbox("Allow version downgrade", &m_apkInstallAllowDowngrade);
         ImGui::PushStyleColor(ImGuiCol_Text, theme.muted);
         ImGui::PushTextWrapPos(0);
         ImGui::TextUnformatted("An existing copy of the same app is replaced and keeps its data.");
@@ -9158,7 +9548,7 @@ void App::renderPreferencesWindow() {
     ImGui::Separator();
     ImGui::Spacing();
 
-    if (ImGui::Checkbox("Restart ADB daemon on app launch", &m_prefs.restartAdbOnLaunch))
+    if (ui::checkbox("Restart ADB daemon on app launch", &m_prefs.restartAdbOnLaunch))
         changed = true;
     ImGui::TextDisabled("  Kills and restarts ADB when the app starts.");
     ImGui::TextDisabled("  Useful if ADB is in a bad state, but disrupts");
@@ -9166,7 +9556,7 @@ void App::renderPreferencesWindow() {
 
     ImGui::Spacing();
 
-    if (ImGui::Checkbox("Kill ADB server when app closes", &m_prefs.killAdbOnClose))
+    if (ui::checkbox("Kill ADB server when app closes", &m_prefs.killAdbOnClose))
         changed = true;
     ImGui::TextDisabled("  Stops the ADB daemon when exiting the app.");
     ImGui::TextDisabled("  Disable if you want ADB to stay running for");
@@ -9180,7 +9570,7 @@ void App::renderPreferencesWindow() {
     ImGui::Separator();
     ImGui::Spacing();
 
-    if (ImGui::Checkbox("Ask for confirmation before closing", &m_prefs.confirmOnClose))
+    if (ui::checkbox("Ask for confirmation before closing", &m_prefs.confirmOnClose))
         changed = true;
     ImGui::TextDisabled("  Shows a Yes/No dialog when pressing the X button.");
     ImGui::TextDisabled("  When disabled, closing minimizes to the system tray.");
@@ -9193,7 +9583,7 @@ void App::renderPreferencesWindow() {
     ImGui::Separator();
     ImGui::Spacing();
 
-    if (ImGui::Checkbox("Verify file integrity (CRC32) after transfer", &m_prefs.enableCrcVerification))
+    if (ui::checkbox("Verify file integrity (CRC32) after transfer", &m_prefs.enableCrcVerification))
         changed = true;
     ImGui::TextDisabled("  Computes CRC32 on both sides after each file");
     ImGui::TextDisabled("  transfer to ensure data integrity.");
@@ -9209,13 +9599,19 @@ void App::renderPreferencesWindow() {
 
     auto drawPipeSelector = [&](const char* label, const char* id, int& value) -> bool {
         bool changed = false;
+        const float s = ui::scale();
+        // Label column fits the longest label so the buttons never overlap it.
+        const float labelColumn = std::max(ImGui::CalcTextSize("Default USB pipes").x,
+            ImGui::CalcTextSize("Default WiFi pipes").x) + 16 * s;
+        const float rowStart = ImGui::GetCursorPosX();
+        ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted(label);
-        ImGui::SameLine(120.0f);
+        ImGui::SameLine(rowStart + labelColumn);
         for (int pipes = 1; pipes <= 4; pipes++) {
-            if (pipes > 1) ImGui::SameLine(0, 6);
+            if (pipes > 1) ImGui::SameLine(0, 6 * s);
             bool selected = (value == pipes);
             std::string btn = "x" + std::to_string(pipes) + "##" + id + std::to_string(pipes);
-            if (modernButton(btn.c_str(), ImVec2(44.0f, 0.0f),
+            if (modernButton(btn.c_str(), ImVec2(std::max(44.0f * s, ImGui::CalcTextSize("x4").x + 24 * s), 0.0f),
                     selected ? ButtonTone::Primary : ButtonTone::Secondary) && value != pipes) {
                 value = pipes;
                 changed = true;
@@ -9282,7 +9678,7 @@ void App::renderNicConfigWindow() {
     ImGui::Separator();
     ImGui::Spacing();
 
-    if (ImGui::Checkbox("Enable multi-NIC parallel transfers", &m_prefs.enableMultiNic))
+    if (ui::checkbox("Enable multi-NIC parallel transfers", &m_prefs.enableMultiNic))
         changed = true;
     ImGui::TextDisabled("  Uses multiple network adapters simultaneously for");
     ImGui::TextDisabled("  faster file transfers. Requires direct TCP connection.");
@@ -9333,7 +9729,7 @@ void App::renderNicConfigWindow() {
                         break;
                     }
                 }
-                if (ImGui::Checkbox("##en", &isEnabled)) {
+                if (ui::checkbox("##en", &isEnabled)) {
                     if (bindIdx >= 0) {
                         m_prefs.multiNicBindings[bindIdx].enabled = isEnabled;
                     } else {
@@ -9586,7 +9982,7 @@ void App::renderThemeWindow() {
     ImGui::Spacing();
     const char* themeModes[] = { "Follow Windows", "Dark", "Light" };
     ImGui::SetNextItemWidth(210.0f);
-    if (ImGui::Combo("Theme Mode", &m_theme.mode, themeModes, 3)) {
+    if (ui::combo("Theme Mode", &m_theme.mode, themeModes, 3)) {
         m_theme.customColors = false;
         m_pendingScale = m_theme.userScale;
         changed = true;
@@ -9895,11 +10291,11 @@ void App::renderDebugWindow() {
     ui::tooltip("Clear the in-app history. Saved log files are kept.");
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding,ImVec2(10*s,9*s));
     const char* levels[]={"All events","Info and above","Warnings and errors","Errors only"};
-    ImGui::SetNextItemWidth(175*s);ImGui::Combo("##LogLevel",&m_debugLevelFilter,levels,4);
+    ImGui::SetNextItemWidth(175*s);ui::combo("##LogLevel",&m_debugLevelFilter,levels,4);
     ImGui::SameLine(0,8*s);
     ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x-96*s);
     ImGui::InputTextWithHint("##LogSearch","Search operations, paths or errors",m_debugTagFilter,sizeof(m_debugTagFilter));
-    ImGui::SameLine(0,8*s);ImGui::Checkbox("Follow",&m_debugAutoScroll);
+    ImGui::SameLine(0,8*s);ui::checkbox("Follow",&m_debugAutoScroll);
     ImGui::PopStyleVar();
     ImGui::TextDisabled("%d visible / %d recent events    %d warnings    %d errors",(int)visible.size(),(int)entries.size(),warnings,errors);
     std::string fileError=logger.fileError();
@@ -9933,16 +10329,58 @@ void App::renderStatusBar() {
     float s=ui::scale();
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,ImVec2(18*s,5*s));
     ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding,0);
-    ImGui::BeginChild("##StatusBar",ImVec2(0,std::max(28*s,ImGui::GetFontSize()+10*s)),ImGuiChildFlags_None,ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_AlwaysUseWindowPadding);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg,ImVec4(0,0,0,0));
+    ImGui::BeginChild("##StatusBar",ImVec2(0,std::max(36*s,ImGui::GetFontSize()+18*s)),ImGuiChildFlags_None,ImGuiWindowFlags_NoScrollbar|ImGuiWindowFlags_AlwaysUseWindowPadding);
+    ImDrawList* draw=ImGui::GetWindowDrawList();
+    const ImVec2 barPos=ImGui::GetWindowPos();
+    const float barWidth=ImGui::GetWindowWidth(), barHeight=ImGui::GetWindowHeight();
+    draw->AddLine(barPos,ImVec2(barPos.x+barWidth,barPos.y),ImGui::GetColorU32(ImGuiCol_Border));
     auto elapsed=std::chrono::steady_clock::now()-m_statusTime;
-    std::string message="F5 Refresh   |   F2 Rename   |   Ctrl+L Folder path   |   F12 Activity log";
-    if(m_asyncBusy)message=m_asyncStatus;
-    else if(!m_statusMessage.empty()&&elapsed<std::chrono::seconds(15))message=m_statusMessage;
-    ui::textClipped(message,ImGui::GetContentRegionAvail().x,ImGui::GetColorU32(ImGuiCol_TextDisabled));
-    ImGui::EndChild();ImGui::PopStyleVar(2);
+    const bool busy=m_asyncBusy.load();
+    const bool recent=!m_statusMessage.empty()&&elapsed<std::chrono::seconds(15);
+    std::string message=busy?m_asyncStatus:recent?m_statusMessage:std::string("Ready");
+    std::string lower=message;
+    std::transform(lower.begin(),lower.end(),lower.begin(),[](unsigned char c){return (char)std::tolower(c);});
+    const bool problem=lower.find("fail")!=std::string::npos||lower.find("error")!=std::string::npos||lower.find("could not")!=std::string::npos;
+    ui::PanelStyle theme(m_resolvedLightTheme);
+    const ImVec4 dot=problem?theme.red:busy?theme.gold:theme.green;
+    const float centerY=barPos.y+barHeight*0.5f;
+    const float x0=ImGui::GetCursorScreenPos().x;
+    if(busy) {
+        const float pulse=0.55f+0.45f*std::sin((float)ImGui::GetTime()*5.0f);
+        ImVec4 halo=dot;halo.w=0.30f*pulse;
+        draw->AddCircleFilled(ImVec2(x0+4*s,centerY),7*s,ImGui::GetColorU32(halo));
+    }
+    draw->AddCircleFilled(ImVec2(x0+4*s,centerY),3.5f*s,ImGui::GetColorU32(dot));
+    struct Key{const char* key;const char* label;};
+    const Key keys[]={{"F5","Refresh"},{"F2","Rename"},{"Ctrl+L","Folder path"},{"F12","Activity log"}};
+    float keysWidth=0;
+    for(const auto& key:keys) keysWidth+=ImGui::CalcTextSize(key.key).x+14*s+6*s+ImGui::CalcTextSize(key.label).x+18*s;
+    const bool showKeys=ImGui::GetContentRegionAvail().x>keysWidth+260*s;
+    const float messageWidth=ImGui::GetContentRegionAvail().x-16*s-(showKeys?keysWidth:0);
+    ui::drawTextClipped(ImVec2(x0+16*s,centerY-ImGui::GetTextLineHeight()*0.5f),message,messageWidth,
+        ImGui::GetColorU32(problem?theme.red:ImGui::GetStyleColorVec4(ImGuiCol_Text)));
+    if(showKeys) {
+        float x=barPos.x+barWidth-28*s-keysWidth+18*s;
+        for(const auto& key:keys) {
+            const ImVec2 keySize=ImGui::CalcTextSize(key.key);
+            const ImVec2 capMin(x,centerY-keySize.y*0.5f-3*s), capMax(x+keySize.x+14*s,centerY+keySize.y*0.5f+3*s);
+            draw->AddRectFilled(ImVec2(capMin.x,capMin.y+2*s),ImVec2(capMax.x,capMax.y+2*s),ImGui::GetColorU32(ImGuiCol_Border),5*s);
+            draw->AddRectFilled(capMin,capMax,ImGui::GetColorU32(ImGuiCol_Button),5*s);
+            draw->AddRect(capMin,capMax,ImGui::GetColorU32(ImGuiCol_Border),5*s);
+            draw->AddText(ImVec2(capMin.x+7*s,centerY-keySize.y*0.5f),ImGui::GetColorU32(ImGuiCol_Text),key.key);
+            x=capMax.x+6*s;
+            draw->AddText(ImVec2(x,centerY-ImGui::GetTextLineHeight()*0.5f),ImGui::GetColorU32(ImGuiCol_TextDisabled),key.label);
+            x+=ImGui::CalcTextSize(key.label).x+18*s;
+        }
+    }
+    ImGui::Dummy(ImVec2(1,1));
+    ImGui::EndChild();ImGui::PopStyleColor();ImGui::PopStyleVar(2);
 }
 
 void App::renderContextMenu(FilePanel& panel) {
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10*ui::scale(), 10*ui::scale()));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(10*ui::scale(), 9*ui::scale()));
     if (ImGui::BeginPopup("##FileContextMenu")) {
         if (m_contextPanel == &panel && panel.validIndex(m_contextIndex)) {
             std::string name = panel.entryName(m_contextIndex);
@@ -10020,6 +10458,7 @@ void App::renderContextMenu(FilePanel& panel) {
         }
         ImGui::EndPopup();
     }
+    ImGui::PopStyleVar(2);
 }
 
 void App::renderNewFolderPopup() {

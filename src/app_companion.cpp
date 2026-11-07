@@ -265,9 +265,9 @@ float App::renderCompanionSection(FilePanel& panel, ImVec2 origin, float width, 
     auto devices = companion::devices();
     const int deviceRows = std::max(1, (int)devices.size());
     const float height = header + deviceRows * (rowHeight + rowGap) + padding;
-    theme.box(ImVec2(origin.x, y), ImVec2(width, height), theme.surface, theme.background, theme.border, 10);
+    theme.card(ImVec2(origin.x, y), ImVec2(width, height), ui::rgb(167, 139, 250));
     theme.heading(ImVec2(origin.x + padding, y + padding), wideHeader ? innerWidth - 430 * s : innerWidth,
-        ui::Icon::Link, "Companion app", "Connect without USB debugging over WiFi or USB tethering");
+        ui::Icon::Link, "Companion app", "Connect without USB debugging over WiFi or USB tethering", ui::rgb(167, 139, 250));
 
     // Manual address for networks that block discovery.
     const float controlsWidth = wideHeader ? 420 * s : innerWidth;
@@ -302,7 +302,7 @@ float App::renderCompanionSection(FilePanel& panel, ImVec2 origin, float width, 
         ImGui::PushID(device.id.c_str());
         ImVec2 p(origin.x + padding, rowY);
         theme.box(p, ImVec2(innerWidth, rowHeight), theme.raised, theme.surface, theme.border, 9);
-        theme.tile(ui::Icon::Phone, ImVec2(p.x + 12 * s, p.y + 8 * s), 40);
+        theme.tile(ui::Icon::Phone, ImVec2(p.x + 12 * s, p.y + (rowHeight - 40 * theme.s) * 0.5f), 40, ui::rgb(167, 139, 250));
         const bool linked = !companion::linkedAdb(device.id).empty();
         const float switchWidth = linked ? 112 * s : 0.0f;
         const float actionsWidth = 236 * s + (linked ? switchWidth + 10 * s : 0.0f);

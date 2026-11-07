@@ -141,6 +141,32 @@ inline void drawTextClipped(ImVec2 position, const std::string& text, float widt
     draw->PopClipRect();
 }
 
+inline ImVec4 shade(ImVec4 color, float amount) {
+    auto channel = [&](float value) {
+        return std::clamp(amount >= 0 ? value + (1.0f - value) * amount : value * (1.0f + amount), 0.0f, 1.0f);
+    };
+    return ImVec4(channel(color.x), channel(color.y), channel(color.z), color.w);
+}
+
+inline float brightness(ImVec4 color) { return color.x * 0.299f + color.y * 0.587f + color.z * 0.114f; }
+
+// Filled rounded rectangle with a vertical gradient. Colors go through the
+// style alpha so disabled items fade like regular widgets.
+inline void gradientRect(ImDrawList* draw, ImVec2 a, ImVec2 b, ImVec4 top, ImVec4 bottom, float rounding,
+    ImDrawFlags flags = 0) {
+    const int first = draw->VtxBuffer.Size;
+    draw->AddRectFilled(a, b, ImGui::GetColorU32(top), rounding, flags);
+    const float height = std::max(1.0f, b.y - a.y);
+    for (int i = first; i < draw->VtxBuffer.Size; ++i) {
+        auto& vertex = draw->VtxBuffer[i];
+        const float t = std::clamp((vertex.pos.y - a.y) / height, 0.0f, 1.0f);
+        const ImVec4 mixed(top.x + (bottom.x - top.x) * t, top.y + (bottom.y - top.y) * t,
+            top.z + (bottom.z - top.z) * t, top.w + (bottom.w - top.w) * t);
+        const ImU32 alpha = vertex.col & IM_COL32_A_MASK;
+        vertex.col = (ImGui::GetColorU32(mixed) & ~IM_COL32_A_MASK) | alpha;
+    }
+}
+
 inline bool button(const char* label, Icon glyph = Icon::None,
     Appearance appearance = Appearance::Quiet, ImVec2 size = ImVec2(0,0), const char* hint = nullptr) {
     const float s = scale();
@@ -150,38 +176,78 @@ inline bool button(const char* label, Icon glyph = Icon::None,
     float iconWidth = glyph == Icon::None ? 0.0f : 18.0f*s;
     float gap = iconWidth > 0 && !visible.empty() ? 7.0f*s : 0.0f;
     ImVec2 textSize = ImGui::CalcTextSize(visible.c_str());
-    if (size.x == 0) size.x = textSize.x + iconWidth + gap + 20.0f*s;
+    if (size.x == 0) size.x = textSize.x + iconWidth + gap + 24.0f*s;
     if (size.y == 0) size.y = controlHeight();
     if (!visible.empty()) size.y = std::max(size.y, textSize.y + 8.0f*s);
-    ImVec4 fill = style.Colors[ImGuiCol_Button];
-    ImVec4 text = style.Colors[ImGuiCol_Text];
-    if (appearance == Appearance::Quiet) { fill.w=0; text=style.Colors[ImGuiCol_TextDisabled]; }
-    if (appearance == Appearance::Selected) fill=style.Colors[ImGuiCol_Header];
-    if (appearance == Appearance::Primary) {
-        fill=style.Colors[ImGuiCol_CheckMark];
-        float brightness=fill.x*0.299f+fill.y*0.587f+fill.z*0.114f;
-        text=brightness>0.45f?ImVec4(0.06f,0.10f,0.18f,1):ImVec4(1,1,1,1);
-    }
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, appearance==Appearance::Secondary?1.0f:0.0f);
-    ImGui::PushStyleColor(ImGuiCol_Button,fill);
-    if (appearance==Appearance::Primary) {
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,ImVec4(std::min(fill.x+0.09f,1.0f),std::min(fill.y+0.09f,1.0f),std::min(fill.z+0.09f,1.0f),1));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive,fill);
-    }
+
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0,0,0,0));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0,0,0,0));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0,0,0,0));
     ImGui::PushID(label);
     bool pressed=ImGui::Button("##action",size);
+    const bool hovered=ImGui::IsItemHovered();
+    const bool held=ImGui::IsItemActive();
+    if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
     ImVec2 min=ImGui::GetItemRectMin(), max=ImGui::GetItemRectMax();
     ImDrawList* draw=ImGui::GetWindowDrawList();
+
+    const ImVec4 accent = style.Colors[ImGuiCol_CheckMark];
+    const ImVec4 raised = style.Colors[ImGuiCol_Button];
+    const ImVec4 border = style.Colors[ImGuiCol_Border];
+    const bool light = brightness(style.Colors[ImGuiCol_WindowBg]) > 0.5f;
+    const float rounding = std::min(8.0f*s, size.y*0.5f);
+    ImVec4 text = style.Colors[ImGuiCol_Text];
+    switch (appearance) {
+    case Appearance::Quiet:
+        text = hovered ? style.Colors[ImGuiCol_Text] : style.Colors[ImGuiCol_TextDisabled];
+        if (hovered || held)
+            draw->AddRectFilled(min, max, ImGui::GetColorU32(held ? style.Colors[ImGuiCol_ButtonActive] : style.Colors[ImGuiCol_ButtonHovered]), rounding);
+        break;
+    case Appearance::Secondary: {
+        ImVec4 top = shade(raised, light ? 0.35f : 0.05f), bottom = shade(raised, light ? 0.0f : -0.12f);
+        if (hovered) { top = shade(top, 0.06f); bottom = shade(bottom, 0.05f); }
+        if (held) std::swap(top, bottom);
+        gradientRect(draw, min, max, top, bottom, rounding);
+        ImVec4 edge = hovered ? ImVec4(border.x + (accent.x - border.x) * 0.6f, border.y + (accent.y - border.y) * 0.6f,
+            border.z + (accent.z - border.z) * 0.6f, 1.0f) : border;
+        draw->AddRect(min, max, ImGui::GetColorU32(edge), rounding, 0, 1.0f);
+        break;
+    }
+    case Appearance::Primary: {
+        ImVec4 top = shade(accent, 0.14f), bottom = shade(accent, -0.16f);
+        if (hovered) { top = shade(top, 0.08f); bottom = shade(bottom, 0.08f); }
+        if (held) std::swap(top, bottom);
+        ImVec4 glow = accent; glow.w = hovered ? 0.30f : 0.18f;
+        draw->AddRectFilled(ImVec2(min.x+2*s, min.y+3*s), ImVec2(max.x-2*s, max.y+3*s), ImGui::GetColorU32(glow), rounding);
+        gradientRect(draw, min, max, top, bottom, rounding);
+        ImVec4 edge = shade(accent, 0.30f); edge.w = 0.85f;
+        draw->AddRect(min, max, ImGui::GetColorU32(edge), rounding, 0, 1.0f);
+        text = brightness(accent) > 0.55f ? ImVec4(0.05f,0.08f,0.14f,1) : ImVec4(1,1,1,1);
+        break;
+    }
+    case Appearance::Selected: {
+        ImVec4 top = accent, bottom = accent, edge = accent;
+        top.w = hovered ? 0.26f : 0.20f; bottom.w = hovered ? 0.16f : 0.11f; edge.w = 0.60f;
+        gradientRect(draw, min, max, top, bottom, rounding);
+        draw->AddRect(min, max, ImGui::GetColorU32(edge), rounding, 0, 1.0f);
+        text = light ? shade(accent, -0.45f) : shade(accent, 0.45f);
+        break;
+    }
+    }
+
     draw->PushClipRect(min,max,true);
     ImU32 ink=ImGui::GetColorU32(text);
     float contentWidth=textSize.x+iconWidth+gap;
-    ImVec2 start(min.x+std::max(6.0f*s,(max.x-min.x-contentWidth)*0.5f),min.y);
+    // Center exactly when the content fits; only fall back to a small inset when it overflows.
+    const float slack=(max.x-min.x-contentWidth)*0.5f;
+    ImVec2 start(std::round(min.x+(slack>=0.0f?slack:4.0f*s)),min.y);
     if (glyph!=Icon::None) icon(glyph,ImVec2(start.x,min.y+(size.y-iconWidth)*0.5f),iconWidth,ink);
     ImVec2 textPosition(start.x+iconWidth+gap,min.y+(size.y-textSize.y)*0.5f);
     drawTextClipped(textPosition,visible,std::max(0.0f,max.x-6*s-textPosition.x),ink);
     draw->PopClipRect();
     ImGui::PopID();
-    ImGui::PopStyleColor(appearance==Appearance::Primary?3:1);
+    ImGui::PopStyleColor(3);
     ImGui::PopStyleVar();
     tooltip(hint);
     return pressed;

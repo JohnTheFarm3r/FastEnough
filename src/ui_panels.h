@@ -60,16 +60,68 @@ struct PanelStyle {
         draw->PopClipRect();
     }
 
-    void tile(ui::Icon glyph, ImVec2 p, float size = 40) const {
-        box(p, ImVec2(size * s, size * s), rgb(27, 57, 90), rgb(16, 36, 59), size >= 56 ? rgb(41, 115, 176) : border, 9);
-        ui::icon(glyph, ImVec2(p.x + size * .22f * s, p.y + size * .22f * s), size * .56f * s,
-            ImGui::GetColorU32(glyph == ui::Icon::Phone ? rgb(225, 245, 255) : rgb(103, 218, 255)));
+    // Icon tile tinted with an accent color, with a soft glow behind it.
+    void tile(ui::Icon glyph, ImVec2 p, float size, ImVec4 tint) const {
+        const float edge = size * s;
+        const ImVec4 base = ImGui::GetStyleColorVec4(ImGuiCol_ChildBg);
+        auto blend = [&](float amount) {
+            return ImVec4(base.x + (tint.x - base.x) * amount, base.y + (tint.y - base.y) * amount,
+                base.z + (tint.z - base.z) * amount, 1.0f);
+        };
+        ImVec4 glow = tint; glow.w = 0.10f;
+        ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(p.x - 2 * s, p.y - 1 * s), ImVec2(p.x + edge + 2 * s, p.y + edge + 4 * s),
+            color(glow), 12 * s);
+        ImVec4 rim = tint; rim.w = 0.45f;
+        box(p, ImVec2(edge, edge), blend(0.30f), blend(0.12f), rim, 10);
+        const ImVec4 ink = ImVec4(std::min(1.0f, tint.x * 0.55f + 0.45f), std::min(1.0f, tint.y * 0.55f + 0.45f),
+            std::min(1.0f, tint.z * 0.55f + 0.45f), 1.0f);
+        ui::icon(glyph, ImVec2(p.x + size * .22f * s, p.y + size * .22f * s), size * .56f * s, color(ink));
     }
 
+    void tile(ui::Icon glyph, ImVec2 p, float size = 40) const { tile(glyph, p, size, blue); }
+
     void heading(ImVec2 p, float width, ui::Icon glyph, const char* title, const char* subtitle) const {
-        tile(glyph, p);
+        heading(p, width, glyph, title, subtitle, blue);
+    }
+
+    void heading(ImVec2 p, float width, ui::Icon glyph, const char* title, const char* subtitle, ImVec4 tint) const {
+        tile(glyph, p, 40, tint);
         label(ImVec2(p.x + 58 * s, p.y + 1 * s), title, width - 58 * s, text, 17, true);
         label(ImVec2(p.x + 58 * s, p.y + 26 * s), subtitle, width - 58 * s, muted, 13);
+    }
+
+    // Section card: gradient body plus a thin tinted highlight along the top edge.
+    void card(ImVec2 p, ImVec2 size, ImVec4 tint, float radius = 12) const {
+        box(p, size, surface, background, border, radius);
+        auto* draw = ImGui::GetWindowDrawList();
+        const float inset = radius * s;
+        const float mid = p.x + size.x * 0.5f;
+        ImVec4 bright = tint; bright.w = 0.75f;
+        ImVec4 clear = tint; clear.w = 0.0f;
+        draw->AddRectFilledMultiColor(ImVec2(p.x + inset, p.y), ImVec2(mid, p.y + 2 * s),
+            color(clear), color(bright), color(bright), color(clear));
+        draw->AddRectFilledMultiColor(ImVec2(mid, p.y), ImVec2(p.x + size.x - inset, p.y + 2 * s),
+            color(bright), color(clear), color(clear), color(bright));
+    }
+
+    ImVec2 pillSize(const char* value, bool withIcon = true) const {
+        const float textWidth = ImGui::CalcTextSize(value).x;
+        return ImVec2(textWidth + (withIcon ? 15 * s + 6 * s : 0) + 22 * s, 26 * s);
+    }
+
+    // Rounded badge with optional icon; icon and text are centered as one group.
+    void pill(ImVec2 p, ImVec2 size, ui::Icon glyph, const char* value, ImVec4 ink) const {
+        auto* draw = ImGui::GetWindowDrawList();
+        ImVec4 fill = ink; fill.w = 0.13f;
+        ImVec4 edge = ink; edge.w = 0.30f;
+        draw->AddRectFilled(p, ImVec2(p.x + size.x, p.y + size.y), color(fill), size.y * 0.5f);
+        draw->AddRect(p, ImVec2(p.x + size.x, p.y + size.y), color(edge), size.y * 0.5f, 0, 1.0f);
+        const ImVec2 textSize = ImGui::CalcTextSize(value);
+        const float iconSize = glyph == ui::Icon::None ? 0 : 15 * s;
+        const float gap = iconSize > 0 ? 6 * s : 0;
+        float x = p.x + (size.x - textSize.x - iconSize - gap) * 0.5f;
+        if (iconSize > 0) ui::icon(glyph, ImVec2(x, p.y + (size.y - iconSize) * 0.5f), iconSize, color(ink));
+        draw->AddText(ImVec2(x + iconSize + gap, p.y + (size.y - textSize.y) * 0.5f), color(ink), value);
     }
 
     bool button(const char* id, const char* title, ui::Icon glyph, ImVec2 p, ImVec2 size,
@@ -98,7 +150,8 @@ struct PanelStyle {
         float textWidth = font->CalcTextSizeA(14 * s, FLT_MAX, 0, title).x;
         float iconWidth = glyph == ui::Icon::None ? 0 : 19 * s;
         float gap = iconWidth && *title ? 8 * s : 0;
-        float x = p.x + (*title ? std::max(8 * s, (size.x - textWidth - iconWidth - gap) * .5f) : (size.x - iconWidth) * .5f);
+        const float slack = (size.x - textWidth - iconWidth - gap) * .5f;
+        float x = std::round(p.x + (*title ? (slack >= 0 ? slack : 4 * s) : (size.x - iconWidth) * .5f));
         if (iconWidth) ui::icon(glyph, ImVec2(x, p.y + (size.y - iconWidth) * .5f), iconWidth, color(ink));
         label(ImVec2(x + iconWidth + gap, p.y + (size.y - 14 * s) * .5f - s), title,
             size.x - (x - p.x) - iconWidth - gap - 6 * s, ink, 14, true);
@@ -340,6 +393,81 @@ inline void statusChip(const char* text, ImVec4 ink) {
     draw->AddCircleFilled(ImVec2(p.x + 13 * s, p.y + height * 0.5f), 4 * s, theme.color(ink));
     draw->AddText(ImVec2(p.x + 24 * s, p.y + 5 * s), theme.color(ink), text);
     ImGui::Dummy(ImVec2(width, height));
+}
+
+// Checkbox with a rounded box, accent fill and centered label. Same layout and
+// ID rules as ImGui::Checkbox so it can replace it in place.
+inline bool checkbox(const char* label, bool* value) {
+    const float s = scale();
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const char* hash = strstr(label, "##");
+    const std::string visible = hash ? std::string(label, hash) : std::string(label);
+    const float frame = ImGui::GetFrameHeight();
+    const ImVec2 textSize = ImGui::CalcTextSize(visible.c_str());
+    const float width = frame + (visible.empty() ? 0.0f : style.ItemInnerSpacing.x + textSize.x);
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    bool pressed = ImGui::InvisibleButton(label, ImVec2(width, frame));
+    if (pressed) *value = !*value;
+    const bool hovered = ImGui::IsItemHovered();
+    if (hovered) ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+
+    PanelStyle theme(lightTheme());
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const float box = std::round(std::clamp(ImGui::GetFontSize() + 2 * s, 14 * s, frame - 2 * s));
+    const ImVec2 a(p.x + std::round((frame - box) * 0.5f), p.y + std::round((frame - box) * 0.5f));
+    const ImVec2 b(a.x + box, a.y + box);
+    const float rounding = 5 * s;
+    const ImVec4 accent = ImGui::GetStyleColorVec4(ImGuiCol_CheckMark);
+    if (*value) {
+        ImVec4 glow = accent; glow.w = hovered ? 0.30f : 0.18f;
+        draw->AddRectFilled(ImVec2(a.x - 2 * s, a.y - 2 * s), ImVec2(b.x + 2 * s, b.y + 2 * s), theme.color(glow), rounding + 2 * s);
+        gradientRect(draw, a, b, shade(accent, 0.15f), shade(accent, -0.15f), rounding);
+        const ImVec4 ink = brightness(accent) > 0.55f ? ImVec4(0.05f, 0.08f, 0.14f, 1) : ImVec4(1, 1, 1, 1);
+        const float u = box / 20.0f;
+        draw->PathLineTo(ImVec2(a.x + 5.0f * u, a.y + 10.5f * u));
+        draw->PathLineTo(ImVec2(a.x + 8.5f * u, a.y + 14.0f * u));
+        draw->PathLineTo(ImVec2(a.x + 15.0f * u, a.y + 6.5f * u));
+        draw->PathStroke(theme.color(ink), 0, std::max(1.6f, 2.2f * u));
+    } else {
+        gradientRect(draw, a, b, theme.background, shade(theme.background, 0.04f), rounding);
+        ImVec4 edge = hovered ? accent : theme.border;
+        if (hovered) edge.w = 0.9f;
+        draw->AddRect(a, b, theme.color(edge), rounding, 0, 1.4f * s);
+    }
+    if (!visible.empty())
+        draw->AddText(ImVec2(p.x + frame + style.ItemInnerSpacing.x, p.y + (frame - textSize.y) * 0.5f),
+            ImGui::GetColorU32(ImGuiCol_Text), visible.c_str());
+    return pressed;
+}
+
+// Combo box with a clean chevron instead of ImGui's square arrow button.
+inline bool beginCombo(const char* label, const char* preview, ImGuiComboFlags flags = 0) {
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const float width = ImGui::CalcItemWidth();
+    const float height = ImGui::GetFrameHeight();
+    const bool customArrow = (flags & ImGuiComboFlags_NoArrowButton) == 0;
+    const bool open = ImGui::BeginCombo(label, preview, flags | ImGuiComboFlags_NoArrowButton);
+    if (customArrow) {
+        const float size = std::round(std::min(14 * scale(), height * 0.5f));
+        const ImU32 ink = ImGui::GetColorU32(open ? ImGuiCol_CheckMark : ImGuiCol_TextDisabled);
+        icon(open ? Icon::Up : Icon::Down, ImVec2(p.x + width - height * 0.5f - size * 0.5f, p.y + (height - size) * 0.5f), size, ink);
+    }
+    return open;
+}
+
+inline bool combo(const char* label, int* current, const char* const items[], int count) {
+    const int index = std::clamp(*current, 0, std::max(0, count - 1));
+    bool changed = false;
+    if (beginCombo(label, count > 0 ? items[index] : "")) {
+        for (int i = 0; i < count; ++i) {
+            const bool selected = i == *current;
+            if (ImGui::Selectable(items[i], selected) && !selected) { *current = i; changed = true; }
+            if (selected) ImGui::SetItemDefaultFocus();
+        }
+        ImGui::EndCombo();
+    }
+    return changed;
 }
 
 // Small uppercase caption used above grouped content.
