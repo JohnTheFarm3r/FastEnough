@@ -569,6 +569,13 @@ private:
     void renderWorkspaceHeader();
     void renderConnectionManager(FilePanel& panel);
     void connectFromManager(const std::string& serial, bool savedWifi);
+    // Online ADB transports of one physical phone, keyed by device identity.
+    struct AdbTransports {
+        std::string usbSerial;
+        std::string wifiSerial;
+        bool both() const { return !usbSerial.empty() && !wifiSerial.empty(); }
+    };
+    std::map<std::string, AdbTransports> onlineAdbTransports(const std::vector<DeviceInfo>& devices) const;
     void pairCompanionDevice(const std::string& serial);
     void linkCompanionDevices(const std::vector<DeviceInfo>& adbDevices);
     void probeCompanionLinks(const std::vector<DeviceInfo>& adbDevices);

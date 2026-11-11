@@ -8961,12 +8961,36 @@ void App::startWizardWifiSetup() {
             postUiMessage(std::move(message));
         };
         try {
-            report("Enabling wireless access on your phone...");
-            m_device.runAdbCommand("-s " + serial + " tcpip 5555");
-            std::this_thread::sleep_for(std::chrono::seconds(2));
-            report("Connecting to your phone over WiFi...");
-            std::string result = m_device.runAdbCommand("connect " + ip + ":5555");
-            bool connected = result.find("connected") != std::string::npos && result.find("failed") == std::string::npos;
+            const std::string wifiSerial = ip + ":5555";
+            auto connectWifi = [&](std::string& output) {
+                for (int attempt = 0; attempt < 2; ++attempt) {
+                    output = m_device.runAdbCommand("connect " + wifiSerial, 8000);
+                    if (output.find("connected") == std::string::npos || output.find("failed") != std::string::npos)
+                        return false;
+                    auto state = m_device.runAdbCommandResult("-s " + wifiSerial + " get-state", 5000);
+                    if (state.succeeded() && state.standardOutput.find("device") != std::string::npos) return true;
+                    // Drop a stale transport so the next attempt opens a fresh one.
+                    m_device.runAdbCommand("disconnect " + wifiSerial, 5000);
+                }
+                output = "The phone did not respond at " + wifiSerial + ".";
+                return false;
+            };
+            // Switching ADB to TCP mode restarts it on the phone and stops the file
+            // helper, so only do it when the phone is not reachable over WiFi yet.
+            report("Checking for an existing wireless connection...");
+            std::string result;
+            bool connected = connectWifi(result);
+            bool restartedAdb = false;
+            if (!connected) {
+                report("Enabling wireless access on your phone...");
+                m_device.runAdbCommand("-s " + serial + " tcpip 5555");
+                restartedAdb = true;
+                report("Connecting to your phone over WiFi...");
+                for (int attempt = 0; attempt < 3 && !connected; ++attempt) {
+                    std::this_thread::sleep_for(std::chrono::seconds(2));
+                    connected = connectWifi(result);
+                }
+            }
             if (!connected) {
                 report("Could not connect over WiFi. " + result, true, false);
                 return;
@@ -8977,9 +9001,11 @@ void App::startWizardWifiSetup() {
             saved.wifiIp = ip;
             saved.port = 5555;
             saved.autoConnect = true;
-            saved.model = queryDeviceDisplayName(ip + ":5555");
-            m_usbToWifiSerial = ip + ":5555";
-            m_wifiToUsbSerial = serial;
+            saved.model = queryDeviceDisplayName(wifiSerial);
+            if (deviceSession(0).serial == serial || deviceSession(0).serial == wifiSerial) {
+                m_usbToWifiSerial = wifiSerial;
+                m_wifiToUsbSerial = serial;
+            }
             auto& devices = m_prefs.savedWifiDevices;
             devices.erase(std::remove_if(devices.begin(), devices.end(),
                 [&](const auto& device) { return device.serial == serial; }), devices.end());
@@ -8988,7 +9014,10 @@ void App::startWizardWifiSetup() {
             m_prefs.save();
             report("Finishing wireless setup...");
             std::this_thread::sleep_for(std::chrono::seconds(1));
-            if (deviceSession(0).serial == serial || deviceSession(0).serial == ip + ":5555") {
+            // After an ADB restart the helper is down until the device poll brings
+            // it back, and the poll then adds the WiFi channel itself.
+            if (!restartedAdb && !m_dualChannelAvailable &&
+                (deviceSession(0).serial == serial || deviceSession(0).serial == wifiSerial)) {
                 m_secondaryChannel.setAdbPath(m_device.getAdbPath());
                 if (m_secondaryChannel.connectTcp(ip, AFM_PORT) && m_secondaryChannel.verifyConnection()) {
                     m_dualChannelAvailable = true;
@@ -8996,7 +9025,8 @@ void App::startWizardWifiSetup() {
                 }
             }
             m_wifiAutoSetupDone = true;
-            report("Your phone is saved and will reconnect automatically on future launches.", true, true);
+            report("Your phone is saved and reconnects automatically. Keep the cable plugged in to use USB and WiFi "
+                   "together, or unplug it to continue over WiFi.", true, true);
         } catch (const std::exception& error) {
             report("Could not finish setup. " + std::string(error.what()), true, false);
         } catch (...) {

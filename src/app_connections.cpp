@@ -31,6 +31,16 @@ std::string savedName(const SavedWifiDevice& device) {
 
 }
 
+std::map<std::string, App::AdbTransports> App::onlineAdbTransports(const std::vector<DeviceInfo>& devices) const {
+    std::map<std::string, AdbTransports> transports;
+    for (const auto& device : devices) {
+        if (device.state != "device" || companion::isSerial(device.serial)) continue;
+        auto& entry = transports[deviceIdentity(device.serial)];
+        (isWirelessAdbSerial(device.serial) ? entry.wifiSerial : entry.usbSerial) = device.serial;
+    }
+    return transports;
+}
+
 void App::connectFromManager(const std::string& serial, bool savedWifi) {
     if (m_connectionPendingSerial == serial) return;
     m_connectionPendingSerial = serial;
@@ -172,6 +182,7 @@ void App::renderWifiWizard() {
         }
         std::vector<DeviceInfo> devices;
         std::map<std::string, size_t> identities;
+        const auto transports = onlineAdbTransports(snapshot);
         for (const auto& device : snapshot) {
             if (device.state != "device") continue;
             auto [it, inserted] = identities.emplace(deviceIdentity(device.serial), devices.size());
@@ -229,11 +240,14 @@ void App::renderWifiWizard() {
             theme.tile(ui::Icon::Phone, ImVec2(p.x + 12 * s, p.y + 13 * s), 40, ImGui::GetStyleColorVec4(ImGuiCol_CheckMark));
             theme.label(ImVec2(p.x + 66 * s, p.y + 13 * s), displayName(serial), bodyWidth - 172 * s, theme.text, 15, true);
             theme.label(ImVec2(p.x + 66 * s, p.y + 39 * s), serial, bodyWidth - 172 * s, theme.muted, 13);
-            bool wifi = isWirelessAdbSerial(serial);
+            auto transport = transports.find(deviceIdentity(serial));
+            const bool both = transport != transports.end() && transport->second.both();
+            bool wifi = both || isWirelessAdbSerial(serial);
             auto ink = wifi ? theme.green : theme.blue;
-            const ImVec2 badgeSize = theme.pillSize(wifi ? "WiFi" : "USB");
+            const char* badgeLabel = both ? "USB + WiFi" : wifi ? "WiFi" : "USB";
+            const ImVec2 badgeSize = theme.pillSize(badgeLabel);
             ImVec2 badge(p.x + bodyWidth - (interactive ? 44 * s : 16 * s) - badgeSize.x, p.y + (66 * s - badgeSize.y) * 0.5f);
-            theme.pill(badge, badgeSize, wifi ? ui::Icon::Wifi : ui::Icon::Usb, wifi ? "WiFi" : "USB", ink);
+            theme.pill(badge, badgeSize, wifi ? ui::Icon::Wifi : ui::Icon::Usb, badgeLabel, ink);
             if (interactive) {
                 ImVec2 center(p.x + bodyWidth - 22 * s, p.y + 33 * s);
                 const ImVec4 accent = ImGui::GetStyleColorVec4(ImGuiCol_CheckMark);
@@ -279,12 +293,16 @@ void App::renderWifiWizard() {
             heading("Check your WiFi connection", "Your phone and computer need to be on the same network.");
             deviceCard(m_wizardSerial, false);
             ImGui::Spacing();
+            auto transport = transports.find(deviceIdentity(m_wizardSerial));
+            const bool wifiActive = transport != transports.end() && !transport->second.wifiSerial.empty();
             if (m_wizardProbeBusy) statusCard(ui::Icon::Wifi, "Checking your phone...", "Looking for an active WiFi connection.", theme.blue, true);
-            else if (!m_wizardWifiIp.empty()) statusCard(ui::Icon::Wifi, "WiFi is ready", "Phone address: " + m_wizardWifiIp, theme.green, false);
+            else if (!m_wizardWifiIp.empty()) statusCard(ui::Icon::Wifi, wifiActive ? "WiFi is already connected" : "WiFi is ready",
+                "Phone address: " + m_wizardWifiIp, theme.green, false);
             else statusCard(ui::Icon::Info, "WiFi needs attention", m_wizardProbeError.empty() ?
                 "Connect your phone to WiFi, then choose Check again." : m_wizardProbeError, theme.gold, false);
             ImGui::Spacing();
-            paragraph("The next step enables wireless access and saves this phone for automatic reconnection.", theme.muted);
+            paragraph(wifiActive ? "This phone is already reachable over WiFi. The next step saves it for automatic reconnection." :
+                "The next step enables wireless access and saves this phone for automatic reconnection.", theme.muted);
         } else if (step == 2) {
             heading("Connecting your phone", "Keep your phone connected while setup finishes.");
             deviceCard(m_wizardSerial, false);
@@ -467,9 +485,17 @@ void App::renderConnectionManager(FilePanel& panel) {
         return companion::isSerial(device.serial) ? device.transportType == AdbTransportType::Network
                                                   : isWirelessAdbSerial(device.serial);
     };
+    const auto transports = onlineAdbTransports(devices);
+    // A phone connected by cable and WiFi at once is listed under its USB serial.
+    auto pairedWifiSerial = [&](const DeviceInfo& device) {
+        if (device.state != "device" || companion::isSerial(device.serial)) return std::string();
+        auto found = transports.find(deviceIdentity(device.serial));
+        return found != transports.end() && found->second.both() ? found->second.wifiSerial : std::string();
+    };
     for (const auto& device : physicalDevices) {
         bool wifi = isWifiDevice(device);
-        if ((m_connectionFilter == 1 && wifi) || (m_connectionFilter == 2 && !wifi)) continue;
+        const bool both = !pairedWifiSerial(device).empty();
+        if ((m_connectionFilter == 1 && wifi && !both) || (m_connectionFilter == 2 && !wifi && !both)) continue;
         if (lower(device.model + " " + device.serial).find(query) != std::string::npos) visibleDevices.push_back(device);
     }
     int rows = std::max(1, ((int)visibleDevices.size() + columns - 1) / columns);
@@ -531,11 +557,13 @@ void App::renderConnectionManager(FilePanel& panel) {
         const std::string readiness = ready ? "Files ready. Click to open instantly." :
             device.state == "device" ? "Preparing file access in the background..." :
             device.state == "unpaired" ? "Click to pair. Approve this computer on the phone." : device.state;
-        ui::tooltip((device.model + "\n" + device.serial + "\n" + readiness).c_str());
-        bool wifi = isWifiDevice(device);
+        const std::string pairedWifi = pairedWifiSerial(device);
+        const bool both = !pairedWifi.empty();
+        ui::tooltip((device.model + "\n" + device.serial + (both ? "\nWiFi: " + pairedWifi : "") + "\n" + readiness).c_str());
+        bool wifi = both || isWifiDevice(device);
         theme.tile(ui::Icon::Phone, ImVec2(p.x + 16 * s, p.y + (78 * s - 42 * s) * 0.5f), 42 * s / theme.s, wifi ? theme.green : theme.blue);
         const bool app = companion::isSerial(device.serial);
-        const char* badge = app ? (wifi ? "WiFi App" : "USB App") : wifi ? "WiFi" : "USB";
+        const char* badge = app ? (wifi ? "WiFi App" : "USB App") : both ? "USB + WiFi" : wifi ? "WiFi" : "USB";
         ImVec4 badgeColor = wifi ? theme.green : theme.blue;
         if (device.state == "unpaired") { badge = "Pair"; badgeColor = theme.gold; }
         else if (device.state != "device") { badge = device.state == "unauthorized" ? "Allow USB" : "Offline"; badgeColor = theme.gold; }
