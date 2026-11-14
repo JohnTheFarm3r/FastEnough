@@ -10514,7 +10514,7 @@ void App::renderNewFolderPopup() {
         if ((createPressed || enter) && strlen(m_newFolderName) > 0 && m_contextPanel) {
             if (m_contextPanel->isAndroid) {
                 std::string mkdirPath = m_contextPanel->currentPath + "/" + m_newFolderName;
-                if (m_selectedDevice >= 0) { int slot = m_contextPanel->deviceSlot; FilePanel* target=m_contextPanel; postAsync("Creating folder: "+mkdirPath, [this, mkdirPath, slot, target]() {
+                { int slot = m_contextPanel->deviceSlot; FilePanel* target=m_contextPanel; postAsync("Creating folder: "+mkdirPath, [this, mkdirPath, slot, target]() {
                     auto& device=deviceForSlot(slot);
                     bool ok=device.createDirectory(mkdirPath);
                     DebugLog::instance().log(ok?LogLevel::Info:LogLevel::Error,"Files",
@@ -10577,7 +10577,7 @@ void App::renderRenamePopup() {
             std::string oldN = m_contextPanel->entryName(m_contextIndex), requestedN(m_renameBuf);
             std::string newN = makeUniquePanelName(*m_contextPanel, requestedN, m_contextIndex);
             if (!newN.empty() && newN != oldN) {
-                if (m_contextPanel->isAndroid && m_selectedDevice >= 0) {
+                if (m_contextPanel->isAndroid) {
                     std::string fromP = m_contextPanel->currentPath+"/"+oldN, toP = m_contextPanel->currentPath+"/"+newN;
                     int slot = m_contextPanel->deviceSlot;
                     FilePanel* targetPanel = m_contextPanel;
@@ -10688,30 +10688,35 @@ void App::renderDeleteConfirmPopup() {
                         if (!m_contextPanel->validIndex(idx)) continue;
                         delPaths.push_back(m_contextPanel->currentPath + "/" + m_contextPanel->entryName(idx));
                     }
-                    if (m_selectedDevice >= 0 && !delPaths.empty()) {
+                    if (!delPaths.empty()) {
                         int slot = m_contextPanel->deviceSlot;
-                        bool refreshLeft = (m_contextPanel == &m_leftPanel);
+                        FilePanel* targetPanel = m_contextPanel;
                         m_contextPanel->selectedIndices.clear();
-                        postAsync("Deleting files...", [this, delPaths, slot, refreshLeft]() {
+                        postAsync("Deleting files...", [this, delPaths, slot, targetPanel]() {
+                            DeviceClient& device = deviceForSlot(slot);
                             int failed = 0;
                             std::string lastError;
                             for (auto& p : delPaths) {
-                                if (!deviceForSlot(slot).deleteFile(p)) {
+                                if (!device.deleteFile(p)) {
                                     failed++;
-                                    lastError = deviceForSlot(slot).lastError();
+                                    lastError = device.lastError();
                                     LOG_ERROR("Files","Delete failed: "+p+": "+lastError);
                                 } else LOG_INFO("Files","Deleted: "+p);
                             }
-                            FilePanel& panel = refreshLeft ? m_leftPanel : m_rightPanel;
-                            panel.needsRefresh = true;
+                            UiMessage message;
+                            message.refreshFilePanel = targetPanel;
                             if (failed == 0) {
-                                m_statusMessage = "Deleted " + std::to_string(delPaths.size()) + " item(s)";
+                                message.hasStatus = true;
+                                message.status = "Deleted " + std::to_string(delPaths.size()) + " item(s)";
                             } else {
-                                m_statusMessage = "Deleted " + std::to_string((int)delPaths.size() - failed) +
+                                message.hasNotification = true;
+                                message.notificationTitle = "Delete Failed";
+                                message.notificationMessage = "Deleted " + std::to_string((int)delPaths.size() - failed) +
                                     " item(s), " + std::to_string(failed) + " failed";
-                                if (!lastError.empty()) m_statusMessage += ": " + lastError;
+                                if (!lastError.empty()) message.notificationMessage += ": " + lastError;
+                                message.notificationIsError = true;
                             }
-                            m_statusTime = std::chrono::steady_clock::now();
+                            postUiMessage(std::move(message));
                         });
                     }
                 } else {

@@ -3519,9 +3519,17 @@ bool DeviceClient::deleteFile(const std::string& path) {
     auto perform=[&]() -> bool {
     if (!m_connected) { m_lastError = "Not connected"; return false; }
     MsgHeader hdr; std::vector<char> payload;
-    if (!runSmallOp(CMD_DELETE, path.data(), (uint32_t)path.size(), hdr, payload)) return false;
+    bool retried = false;
+    if (!runSmallOp(CMD_DELETE, path.data(), (uint32_t)path.size(), hdr, payload)) {
+        // An idle control channel can go stale. Retry once on a fresh connection.
+        LOG_WARN("Files", "Delete retry after connection error: " + m_lastError);
+        retried = true;
+        if (!runSmallOp(CMD_DELETE, path.data(), (uint32_t)path.size(), hdr, payload)) return false;
+    }
     if (hdr.cmd == RSP_ERROR) {
         m_lastError = std::string(payload.data(), payload.size());
+        // The first attempt may have reached the phone before the connection dropped.
+        if (retried && m_lastError.find("No such file") != std::string::npos) return true;
         return false;
     }
     return hdr.cmd == RSP_OK;
