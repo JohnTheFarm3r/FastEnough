@@ -218,27 +218,25 @@ static bool normalizeForwardMatrixToD50(float* matrix) {
     return true;
 }
 
-// Build big-endian OpcodeList2 binary data for a GainMap (lens shading correction).
+// Build big-endian OpcodeList2 binary data for the lens shading correction: one GainMap per
+// CFA position. Channel c of the MCRAW map belongs to the pixels at row (c >> 1) and column
+// (c & 1) of every 2x2 block. Map points span the image from edge to edge.
 static std::vector<uint8_t> buildGainMapOpcode(const DngParams& p) {
     std::vector<uint8_t> buf;
     if (p.lensShadingMap.empty() || p.lensShadingMapWidth <= 0 || p.lensShadingMapHeight <= 0)
         return buf;
 
-    unsigned int planes = std::min<unsigned int>((unsigned int)p.lensShadingMap.size(), 4);
-    unsigned int mapH = (unsigned int)p.lensShadingMapHeight;
-    unsigned int mapW = (unsigned int)p.lensShadingMapWidth;
-    unsigned int imgH = p.height;
-    unsigned int imgW = p.width;
-    unsigned int rowPitch = (mapH > 1) ? std::max(1u, (imgH - 1) / (mapH - 1)) : imgH;
-    unsigned int colPitch = (mapW > 1) ? std::max(1u, (imgW - 1) / (mapW - 1)) : imgW;
+    const unsigned int mapH = (unsigned int)p.lensShadingMapHeight;
+    const unsigned int mapW = (unsigned int)p.lensShadingMapWidth;
+    const unsigned int imgH = p.height;
+    const unsigned int imgW = p.width;
+    const unsigned int slots = 4;
 
-    // Total gain floats
-    size_t gainCount = (size_t)planes * mapH * mapW;
     // Opcode data size: 4*4 (area) + 2*4 (plane) + 2*4 (pitch) + 2*4 (map dims)
-    //   + 2*8 (spacing) + 2*8 (origin) + 4 (map_planes) + gainCount*4
-    size_t opcodeDataSize = 4*4 + 2*4 + 2*4 + 2*4 + 2*8 + 2*8 + 4 + gainCount*4;
-    // Total: 4 (count) + 4 (id) + 4 (version) + 4 (flags) + 4 (size) + data
-    buf.reserve(4 + 4 + 4 + 4 + 4 + opcodeDataSize);
+    //   + 2*8 (spacing) + 2*8 (origin) + 4 (map_planes) + gains*4
+    const size_t opcodeDataSize = 4*4 + 2*4 + 2*4 + 2*4 + 2*8 + 2*8 + 4 + (size_t)mapH * mapW * 4;
+    // Total: 4 (count) + per opcode 4 (id) + 4 (version) + 4 (flags) + 4 (size) + data
+    buf.reserve(4 + slots * (16 + opcodeDataSize));
 
     // Helper: write big-endian uint32
     auto writeU32BE = [&](uint32_t v) {
@@ -261,43 +259,36 @@ static std::vector<uint8_t> buildGainMapOpcode(const DngParams& p) {
         writeU32BE(bits);
     };
 
-    // Opcode count = 1
-    writeU32BE(1);
-    // Opcode ID = 9 (GainMap)
-    writeU32BE(9);
-    // DNG version 1.3.0.0
-    writeU32BE(0x01030000);
-    // Flags = 0
-    writeU32BE(0);
-    // Data size
-    writeU32BE((uint32_t)opcodeDataSize);
+    writeU32BE(slots);  // opcode count
+    for (unsigned int slot = 0; slot < slots; slot++) {
+        writeU32BE(9);            // GainMap
+        writeU32BE(0x01030000);   // DNG version 1.3.0.0
+        writeU32BE(0);            // flags
+        writeU32BE((uint32_t)opcodeDataSize);
 
-    // Area of interest: top, left, bottom, right
-    writeU32BE(0);        // top
-    writeU32BE(0);        // left
-    writeU32BE(imgH);     // bottom
-    writeU32BE(imgW);     // right
-    // Plane info
-    writeU32BE(0);        // plane (starting plane)
-    writeU32BE(planes);   // planes
-    // Pitch
-    writeU32BE(rowPitch);
-    writeU32BE(colPitch);
-    // Map dimensions
-    writeU32BE(mapH);
-    writeU32BE(mapW);
-    // Spacing (doubles)
-    writeDoubleBE((imgH > 0) ? (double)rowPitch / (double)imgH : 0.0);
-    writeDoubleBE((imgW > 0) ? (double)colPitch / (double)imgW : 0.0);
-    // Origin (doubles)
-    writeDoubleBE(0.0);
-    writeDoubleBE(0.0);
-    // Map planes
-    writeU32BE(planes);
+        // Area of interest: top, left, bottom, right
+        writeU32BE(slot >> 1);
+        writeU32BE(slot & 1);
+        writeU32BE(imgH);
+        writeU32BE(imgW);
+        // Plane, planes
+        writeU32BE(0);
+        writeU32BE(1);
+        // Row and column pitch: every second row and column, one CFA position
+        writeU32BE(2);
+        writeU32BE(2);
+        // Map dimensions
+        writeU32BE(mapH);
+        writeU32BE(mapW);
+        // Spacing and origin, relative to the area
+        writeDoubleBE(mapH > 1 ? 1.0 / (double)(mapH - 1) : 1.0);
+        writeDoubleBE(mapW > 1 ? 1.0 / (double)(mapW - 1) : 1.0);
+        writeDoubleBE(0.0);
+        writeDoubleBE(0.0);
+        // Map planes
+        writeU32BE(1);
 
-    // Gain data: plane-major, row-major within each plane
-    for (unsigned int ch = 0; ch < planes; ch++) {
-        const auto& chanData = (ch < p.lensShadingMap.size()) ? p.lensShadingMap[ch] : p.lensShadingMap[0];
+        const auto& chanData = (slot < p.lensShadingMap.size()) ? p.lensShadingMap[slot] : p.lensShadingMap[0];
         for (unsigned int v = 0; v < mapH; v++) {
             for (unsigned int h = 0; h < mapW; h++) {
                 size_t idx = (size_t)v * mapW + h;

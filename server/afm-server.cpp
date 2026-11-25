@@ -2532,23 +2532,23 @@ static bool build_dng_memory(
                 shadingMap.emplace_back(std::move(chanData));
             }
             if (!shadingMap.empty()) {
-                unsigned int planes = std::min<unsigned int>((unsigned int)shadingMap.size(), 4);
                 unsigned int mapH = (unsigned int)lsmH, mapW = (unsigned int)lsmW;
-                unsigned int rowPitch = (mapH > 1) ? std::max(1u, (height - 1) / (mapH - 1)) : height;
-                unsigned int colPitch = (mapW > 1) ? std::max(1u, (width - 1) / (mapW - 1)) : width;
+                tinydngwriter::OpcodeList opcodeList;
 
-                tinydngwriter::GainMapParams gp;
-                gp.top = 0; gp.left = 0; gp.bottom = height; gp.right = width;
-                gp.plane = 0; gp.planes = planes;
-                gp.row_pitch = rowPitch; gp.col_pitch = colPitch;
-                gp.map_points_v = mapH; gp.map_points_h = mapW;
-                gp.map_spacing_v = (height > 0) ? (double)rowPitch / (double)height : 0.0;
-                gp.map_spacing_h = (width > 0) ? (double)colPitch / (double)width : 0.0;
-                gp.map_origin_v = 0.0; gp.map_origin_h = 0.0;
-                gp.map_planes = planes;
-
-                for (unsigned int ch = 0; ch < planes; ch++) {
-                    const auto& src = (ch < shadingMap.size()) ? shadingMap[ch] : shadingMap[0];
+                // One GainMap per CFA position. Channel c of the MCRAW map belongs to the pixels
+                // at row (c >> 1) and column (c & 1) of every 2x2 block. Map points span the
+                // image from edge to edge.
+                for (unsigned int slot = 0; slot < 4; slot++) {
+                    const auto& src = (slot < shadingMap.size()) ? shadingMap[slot] : shadingMap[0];
+                    tinydngwriter::GainMapParams gp;
+                    gp.top = slot >> 1; gp.left = slot & 1; gp.bottom = height; gp.right = width;
+                    gp.plane = 0; gp.planes = 1;
+                    gp.row_pitch = 2; gp.col_pitch = 2;
+                    gp.map_points_v = mapH; gp.map_points_h = mapW;
+                    gp.map_spacing_v = (mapH > 1) ? 1.0 / (double)(mapH - 1) : 1.0;
+                    gp.map_spacing_h = (mapW > 1) ? 1.0 / (double)(mapW - 1) : 1.0;
+                    gp.map_origin_v = 0.0; gp.map_origin_h = 0.0;
+                    gp.map_planes = 1;
                     for (unsigned int v = 0; v < mapH; v++) {
                         for (unsigned int h = 0; h < mapW; h++) {
                             size_t idx = (size_t)v * mapW + h;
@@ -2558,10 +2558,9 @@ static bool build_dng_memory(
                             gp.gain_data.push_back(gain);
                         }
                     }
+                    opcodeList.AddGainMap(gp);
                 }
 
-                tinydngwriter::OpcodeList opcodeList;
-                opcodeList.AddGainMap(gp);
                 dng.SetOpcodeList2(opcodeList);
             }
         }
